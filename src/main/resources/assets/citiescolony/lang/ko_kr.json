@@ -1,0 +1,13 @@
+{
+  "block.citiescolony.town_hall": "콜로니 시청",
+  "block.citiescolony.paved_road": "콜로니 포장 도로",
+  "block.citiescolony.guard_outpost": "경비 초소",
+  "item.citiescolony.colony_scepter": "콜로니 원정 지휘봉",
+  "item.citiescolony.citizen_spawn_charter": "콜로니 주민 소환장",
+  "entity.citiescolony.colony_citizen": "콜로니 주민",
+  "key.categories.citiescolony.rts": "마인크래프트 시티즈 콜로니 RTS",
+  "key.citiescolony.toggle_rts_camera": "3인칭 RTS 쿼터뷰 시점 전환",
+  "key.citiescolony.cycle_zone_type": "구역 지정 모드 변경",
+  "key.citiescolony.toggle_delete_zone_mode": "구역 삭제 모드 전환",
+  "key.citiescolony.cycle_citizen_job": "선택한 주민 직업 변경"
+}

@@ -1,0 +1,13 @@
+{
+  "block.citiescolony.town_hall": "Colony Town Hall",
+  "block.citiescolony.paved_road": "Paved Colony Road",
+  "block.citiescolony.guard_outpost": "Guard Outpost Banner",
+  "item.citiescolony.colony_scepter": "Colony Expedition Scepter",
+  "item.citiescolony.citizen_spawn_charter": "Colony Citizen Charter",
+  "entity.citiescolony.colony_citizen": "Colony Citizen",
+  "key.categories.citiescolony.rts": "Minecraft Cities Colony RTS",
+  "key.citiescolony.toggle_rts_camera": "Toggle 3rd-Person RTS Camera",
+  "key.citiescolony.cycle_zone_type": "Cycle Zone Designation Mode",
+  "key.citiescolony.toggle_delete_zone_mode": "Toggle Zone Delete Mode",
+  "key.citiescolony.cycle_citizen_job": "Cycle Selected Citizen Job"
+}

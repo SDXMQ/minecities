@@ -13,8 +13,9 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.Goal;
-import net.minecraft.world.entity.monster.Monster;
+import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -135,17 +136,23 @@ public class CitizenJobFSMGoal extends Goal {
                 return true;
             }
             BlockPos anchor = this.citizen.getOutpostPos().orElseGet(this.citizen::blockPosition);
-            AABB searchBox = new AABB(anchor).inflate(GUARD_ALERT_RADIUS, 8.0D, GUARD_ALERT_RADIUS);
-            List<Monster> monsters = level.getEntitiesOfClass(Monster.class, searchBox, LivingEntity::isAlive);
-            if (!monsters.isEmpty()) {
-                Monster nearest = monsters.stream()
+            AABB searchBox = new AABB(anchor).inflate(GUARD_ALERT_RADIUS, 12.0D, GUARD_ALERT_RADIUS);
+            List<Mob> hostiles = level.getEntitiesOfClass(
+                    Mob.class,
+                    searchBox,
+                    mob -> mob.isAlive() && mob instanceof Enemy
+            );
+            if (!hostiles.isEmpty()) {
+                Mob nearest = hostiles.stream()
                         .min(Comparator.comparingDouble(this.citizen::distanceToSqr))
-                        .orElse(monsters.getFirst());
+                        .orElse(hostiles.getFirst());
                 this.citizen.setTarget(nearest);
                 ensureGuardArmed(level, manager);
                 return true;
             }
-        } else if (this.citizen.getLastHurtByMob() instanceof Monster attacker && attacker.isAlive()) {
+        } else if (this.citizen.getLastHurtByMob() instanceof LivingEntity attacker
+                && attacker.isAlive()
+                && attacker instanceof Enemy) {
             this.citizen.setTarget(attacker);
             return true;
         }
