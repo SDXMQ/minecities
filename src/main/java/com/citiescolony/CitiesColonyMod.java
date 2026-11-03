@@ -113,12 +113,29 @@ public class CitiesColonyMod {
                     if (context.getLevel() instanceof ServerLevel serverLevel) {
                         BlockPos rallyTarget = context.getClickedPos().above();
                         CityZoneManager manager = CityZoneManager.get(serverLevel);
+                        net.minecraft.world.phys.AABB bossSearchBox = new net.minecraft.world.phys.AABB(rallyTarget).inflate(48.0D, 24.0D, 48.0D);
+                        java.util.List<net.minecraft.world.entity.LivingEntity> expeditionTargets = serverLevel.getEntitiesOfClass(
+                                net.minecraft.world.entity.LivingEntity.class,
+                                bossSearchBox,
+                                e -> e.isAlive() && e instanceof net.minecraft.world.entity.monster.Enemy
+                        );
+
                         for (Entity entity : serverLevel.getAllEntities()) {
                             if (entity instanceof ColonyCitizenEntity citizen
                                     && citizen.isAlive()
                                     && citizen.getJobType() == com.citiescolony.api.JobType.GUARD) {
+                                if (citizen.getCitizenInventory().findCombatWeapon().isEmpty()) {
+                                    net.minecraft.world.item.ItemStack supplied =
+                                            com.citiescolony.common.city.StorageLogisticsHelper.withdrawWeaponForGuard(serverLevel, manager);
+                                    if (!supplied.isEmpty()) {
+                                        citizen.getCitizenInventory().insertStack(supplied);
+                                    }
+                                }
                                 citizen.equipBestCombatWeapon();
                                 citizen.issuePlayerCommand(serverLevel, rallyTarget);
+                                if (!expeditionTargets.isEmpty()) {
+                                    citizen.setTarget(expeditionTargets.getFirst());
+                                }
                             }
                         }
                         ColonyNetworkHandler.broadcastResourceHudSync(serverLevel, manager);
@@ -179,7 +196,7 @@ public class CitiesColonyMod {
     @SubscribeEvent
     public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer serverPlayer) {
-            ServerLevel level = serverPlayer.serverLevel();
+            ServerLevel level = serverPlayer.level();
             CityZoneManager manager = CityZoneManager.get(level);
             ColonyNetworkHandler.sendCitySyncToPlayer(serverPlayer, manager);
             ColonyNetworkHandler.broadcastResourceHudSync(level, manager);

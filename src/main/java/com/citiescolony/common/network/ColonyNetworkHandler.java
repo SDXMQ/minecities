@@ -96,7 +96,7 @@ public final class ColonyNetworkHandler {
                 return;
             }
 
-            ServerLevel level = player.serverLevel();
+            ServerLevel level = player.level();
             CityZoneManager manager = CityZoneManager.get(level);
             if (payload.deleteMode()) {
                 manager.removeZonesIntersecting(bounds);
@@ -119,7 +119,7 @@ public final class ColonyNetworkHandler {
                 return;
             }
 
-            ServerLevel level = player.serverLevel();
+            ServerLevel level = player.level();
             List<Integer> ids = payload.citizenEntityIds();
             int limit = Math.min(ids.size(), MAX_COMMANDED_CITIZENS);
 
@@ -127,7 +127,7 @@ public final class ColonyNetworkHandler {
                 Entity entity = level.getEntity(ids.get(i));
                 if (entity instanceof ColonyCitizenEntity citizen
                         && citizen.isAlive()
-                        && citizen.distanceToSqr(player) <= MAX_RTS_INTERACTION_DISTANCE_SQR) {
+                        && isAuthorizedForRtsAction(player, citizen.blockPosition())) {
                     citizen.issuePlayerCommand(level, targetPos);
                 }
             }
@@ -145,11 +145,11 @@ public final class ColonyNetworkHandler {
                 return;
             }
 
-            ServerLevel level = player.serverLevel();
+            ServerLevel level = player.level();
             Entity entity = level.getEntity(payload.citizenEntityId());
             if (entity instanceof ColonyCitizenEntity citizen
                     && citizen.isAlive()
-                    && citizen.distanceToSqr(player) <= MAX_RTS_INTERACTION_DISTANCE_SQR) {
+                    && isAuthorizedForRtsAction(player, citizen.blockPosition())) {
                 citizen.setJobType(payload.jobType());
                 CityZoneManager manager = CityZoneManager.get(level);
                 broadcastResourceHudSync(level, manager);
@@ -169,10 +169,17 @@ public final class ColonyNetworkHandler {
         if (player == null || targetPos == null || !player.isAlive() || player.isSpectator()) {
             return false;
         }
-        if (!player.serverLevel().isLoaded(targetPos)) {
+        ServerLevel level = player.level();
+        if (!level.isLoaded(targetPos)) {
             return false;
         }
-        return player.blockPosition().distSqr(targetPos) <= MAX_RTS_INTERACTION_DISTANCE_SQR;
+        if (player.blockPosition().distSqr(targetPos) <= MAX_RTS_INTERACTION_DISTANCE_SQR) {
+            return true;
+        }
+        CityZoneManager manager = CityZoneManager.get(level);
+        return manager.getTownHallPos()
+                .map(townHall -> townHall.distSqr(targetPos) <= MAX_RTS_INTERACTION_DISTANCE_SQR)
+                .orElse(false);
     }
 
     public static void sendCitySyncToPlayer(ServerPlayer player, CityZoneManager manager) {

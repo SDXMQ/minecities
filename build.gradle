@@ -36,17 +36,27 @@ sourceSets {
         }
         resources {
             srcDirs = ['src/main/resources', 'src/generated/resources']
+            include 'META-INF/neoforge.mods.toml'
+            include 'META-INF/accesstransformer.cfg'
+            include 'assets/citiescolony/**'
+            include 'data/citiescolony/**'
+            include 'pack.mcmeta'
         }
     }
     test {
         java {
             srcDirs = ['src/test/java']
+            include 'com/citiescolony/**'
         }
     }
 }
 
 neoForge {
     version = project.neoforge_version
+
+    accessTransformers {
+        from file('src/main/resources/META-INF/accesstransformer.cfg')
+    }
 
     mods {
         "${mod_id}" {

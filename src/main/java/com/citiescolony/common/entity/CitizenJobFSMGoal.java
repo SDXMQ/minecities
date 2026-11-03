@@ -52,11 +52,13 @@ public class CitizenJobFSMGoal extends Goal {
     private static final double GUARD_DISENGAGE_RADIUS_SQR = 676.0D; // 26 blocks
     private static final int WORK_DURATION_TICKS = 30;
     private static final int ATTACK_COOLDOWN_TICKS = 20;
+    private static final int MAX_MOVE_TICKS = 200;
 
     private final ColonyCitizenEntity citizen;
     private FsmState state = FsmState.IDLE;
     private BlockPos activeStorageTarget;
     private int workTicks = 0;
+    private int moveTicks = 0;
     private int combatCooldown = 0;
     private int idleCheckCooldown = 0;
 
@@ -74,6 +76,9 @@ public class CitizenJobFSMGoal extends Goal {
         this.citizen.setFsmStateName(nextState);
         if (nextState != FsmState.WORKING) {
             this.workTicks = 0;
+        }
+        if (nextState != FsmState.MOVE_TO_TASK && nextState != FsmState.MOVE_TO_STORAGE) {
+            this.moveTicks = 0;
         }
     }
 
@@ -235,10 +240,18 @@ public class CitizenJobFSMGoal extends Goal {
 
         ColonyTask task = taskOpt.get();
         BlockPos target = task.targetPos();
-        if (this.citizen.blockPosition().distSqr(target) <= WORK_REACH_SQR) {
+        if (isWithinWorkReach(task)) {
             this.citizen.getNavigation().stop();
             task.markInProgress();
             transitionTo(FsmState.WORKING);
+            return;
+        }
+
+        this.moveTicks++;
+        if (this.moveTicks > MAX_MOVE_TICKS) {
+            manager.cancelTask(task.taskId());
+            this.citizen.setCurrentTask(null);
+            transitionTo(FsmState.IDLE);
             return;
         }
 
@@ -254,6 +267,21 @@ public class CitizenJobFSMGoal extends Goal {
                 transitionTo(FsmState.WORKING);
             }
         }
+    }
+
+    private boolean isWithinWorkReach(ColonyTask task) {
+        BlockPos citizenPos = this.citizen.blockPosition();
+        BlockPos target = task.targetPos();
+        if (citizenPos.distSqr(target) <= WORK_REACH_SQR) {
+            return true;
+        }
+        if (task.type() == ColonyTask.TaskType.CHOP || task.type() == ColonyTask.TaskType.MINE) {
+            int dx = citizenPos.getX() - target.getX();
+            int dz = citizenPos.getZ() - target.getZ();
+            int dy = Math.abs(citizenPos.getY() - target.getY());
+            return (dx * dx + dz * dz) <= 9 && dy <= 8;
+        }
+        return false;
     }
 
     private void tickWorking(ServerLevel level, CityZoneManager manager) {

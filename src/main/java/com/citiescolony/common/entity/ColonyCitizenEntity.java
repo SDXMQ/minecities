@@ -204,6 +204,9 @@ public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMo
             return;
         }
         CityZoneManager manager = CityZoneManager.get(level);
+        manager.releaseCitizenTasks(this.getUUID());
+        this.currentTask = null;
+
         Optional<ZoneData> targetZone = manager.getZoneAt(targetPos);
         if (targetZone.isPresent()) {
             ZoneData zone = targetZone.get();
@@ -218,8 +221,47 @@ public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMo
         } else if (getJobType() == JobType.GUARD) {
             setOutpostPos(targetPos);
         }
-        setCommandedTargetPos(targetPos);
+
+        Optional<ColonyTask> forcedTaskOpt = createForcedTaskIfActionable(level, targetPos);
+        if (forcedTaskOpt.isPresent()) {
+            ColonyTask forcedTask = forcedTaskOpt.get();
+            forcedTask.assignTo(this.getUUID());
+            manager.enqueueTask(forcedTask);
+            this.currentTask = forcedTask;
+            this.commandedTargetPos = null;
+        } else {
+            setCommandedTargetPos(targetPos);
+        }
         this.getNavigation().moveTo(targetPos.getX() + 0.5D, targetPos.getY(), targetPos.getZ() + 0.5D, 1.15D);
+    }
+
+    private Optional<ColonyTask> createForcedTaskIfActionable(ServerLevel level, BlockPos targetPos) {
+        if (!level.isLoaded(targetPos) || getJobType() == JobType.GUARD) {
+            return Optional.empty();
+        }
+        net.minecraft.world.level.block.state.BlockState state = level.getBlockState(targetPos);
+        if (com.citiescolony.common.city.ZoneTaskGenerator.isLogBlock(state)) {
+            if (getJobType() == JobType.NONE) {
+                setJobType(JobType.LUMBERJACK);
+            }
+            if (getJobType().canExecute(ColonyTask.TaskType.CHOP)) {
+                return Optional.of(new ColonyTask(ColonyTask.TaskType.CHOP, targetPos, 200));
+            }
+        } else if (com.citiescolony.common.city.ZoneTaskGenerator.isMatureCrop(state)) {
+            if (getJobType() == JobType.NONE) {
+                setJobType(JobType.FARMER);
+            }
+            if (getJobType().canExecute(ColonyTask.TaskType.HARVEST)) {
+                return Optional.of(new ColonyTask(ColonyTask.TaskType.HARVEST, targetPos, 200));
+            }
+        } else if (com.citiescolony.common.city.StorageLogisticsHelper.getStorageContainerAt(level, targetPos).isPresent()
+                && this.inventory.hasDeliverableItems()) {
+            return Optional.of(new ColonyTask(ColonyTask.TaskType.DELIVER, targetPos, 200));
+        } else if (getJobType() == JobType.MINER
+                && com.citiescolony.common.city.ZoneTaskGenerator.isMineableTopBlock(level, targetPos, state)) {
+            return Optional.of(new ColonyTask(ColonyTask.TaskType.MINE, targetPos, 200));
+        }
+        return Optional.empty();
     }
 
     @Override

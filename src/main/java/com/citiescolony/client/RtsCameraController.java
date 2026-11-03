@@ -107,10 +107,11 @@ public final class RtsCameraController {
             focusPosition = new Vec3(playerPos.x, playerPos.y, playerPos.z);
             altitude = Mth.clamp(altitude, MIN_ALTITUDE, MAX_ALTITUDE);
             pitch = Mth.clamp(pitch, MIN_PITCH, MAX_PITCH);
+            rebuildViewMatrixFromAngles();
             mc.mouseHandler.releaseMouse();
             if (mc.gui != null && mc.gui.hud != null) {
                 mc.gui.hud.setOverlayMessage(
-                        Component.literal("[RTS 모드 활성화] WASD: 이동 | 휠: 줌 | 휠드래그: 회전 | 좌클릭드래그: 구역지정 | 우클릭: 주민명령"),
+                        Component.literal("[RTS 모드 활성화] WASD: 이동 | 휠: 줌 | 휠드래그: 회전 | 좌클릭드래그: 구역지정(Shift+드래그: 주민 다중선택) | 우클릭: 주민명령"),
                         false
                 );
             }
@@ -231,6 +232,10 @@ public final class RtsCameraController {
         Vec3 camPos = getCameraWorldPosition();
         camera.setPosition(camPos.x, camPos.y, camPos.z);
 
+        rebuildViewMatrixFromAngles();
+    }
+
+    private static void rebuildViewMatrixFromAngles() {
         Quaternionf rotation = new Quaternionf()
                 .rotationX((float) Math.toRadians(pitch))
                 .rotateY((float) Math.toRadians(yaw + 180.0F));
@@ -287,9 +292,17 @@ public final class RtsCameraController {
                 }
             } else if (action == GLFW.GLFW_RELEASE && leftMouseDraggingZone) {
                 leftMouseDraggingZone = false;
-                if (dragStartPos != null && dragCurrentPos != null && zoneActionDispatcher != null) {
+                if (dragStartPos != null && dragCurrentPos != null) {
                     BlockPos elevatedEnd = dragCurrentPos.above(4);
-                    zoneActionDispatcher.dispatchZoneAction(dragStartPos, elevatedEnd, selectedZoneType, deleteZoneMode);
+                    boolean shiftSelectOnly = InputConstants.isKeyDown(mc.getWindow().getWindow(), GLFW.GLFW_KEY_LEFT_SHIFT);
+                    if (shiftSelectOnly) {
+                        selectCitizensInBox(mc.level, dragStartPos, elevatedEnd, true);
+                    } else {
+                        selectCitizensInBox(mc.level, dragStartPos, elevatedEnd, false);
+                        if (zoneActionDispatcher != null) {
+                            zoneActionDispatcher.dispatchZoneAction(dragStartPos, elevatedEnd, selectedZoneType, deleteZoneMode);
+                        }
+                    }
                 }
                 dragStartPos = null;
                 dragCurrentPos = null;
@@ -308,6 +321,37 @@ public final class RtsCameraController {
             }
             event.setCanceled(true);
         }
+    }
+
+    public static int selectCitizensInBox(
+            net.minecraft.world.level.Level level,
+            BlockPos firstCorner,
+            BlockPos secondCorner,
+            boolean additive
+    ) {
+        if (level == null || firstCorner == null || secondCorner == null) {
+            return 0;
+        }
+        int minX = Math.min(firstCorner.getX(), secondCorner.getX()) - 1;
+        int minY = Math.min(firstCorner.getY(), secondCorner.getY()) - 2;
+        int minZ = Math.min(firstCorner.getZ(), secondCorner.getZ()) - 1;
+        int maxX = Math.max(firstCorner.getX(), secondCorner.getX()) + 2;
+        int maxY = Math.max(firstCorner.getY(), secondCorner.getY()) + 4;
+        int maxZ = Math.max(firstCorner.getZ(), secondCorner.getZ()) + 2;
+
+        net.minecraft.world.phys.AABB searchBox = new net.minecraft.world.phys.AABB(minX, minY, minZ, maxX, maxY, maxZ);
+        List<ColonyCitizenEntity> found = level.getEntitiesOfClass(
+                ColonyCitizenEntity.class,
+                searchBox,
+                ColonyCitizenEntity::isAlive
+        );
+        if (!found.isEmpty() && !additive) {
+            selectedCitizenIds.clear();
+        }
+        for (ColonyCitizenEntity citizen : found) {
+            selectedCitizenIds.add(citizen.getId());
+        }
+        return found.size();
     }
 
     private static void cycleSelectedCitizensJob() {

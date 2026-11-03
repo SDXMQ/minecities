@@ -275,7 +275,47 @@ public final class StorageLogisticsHelper {
     }
 
     public static ItemStack withdrawWeaponForGuard(ServerLevel level, CityZoneManager manager) {
-        return extractMatchingItem(level, manager, StorageLogisticsHelper::isCombatWeapon, 1);
+        ItemStack existing = extractMatchingItem(level, manager, StorageLogisticsHelper::isCombatWeapon, 1);
+        if (!existing.isEmpty()) {
+            return existing;
+        }
+        return craftWeaponFromStorageResources(level, manager);
+    }
+
+    /**
+     * Synthesizes a combat weapon (Iron Sword, Stone Sword, or Wooden Sword) by consuming raw
+     * materials from STORAGE chests when no pre-crafted weapon is available.
+     */
+    public static ItemStack craftWeaponFromStorageResources(ServerLevel level, CityZoneManager manager) {
+        ItemStack wood = extractMatchingItem(level, manager, s -> s.is(ItemTags.LOGS) || s.is(ItemTags.PLANKS), 1);
+        if (wood.isEmpty()) {
+            return ItemStack.EMPTY;
+        }
+        ItemStack iron = extractMatchingItem(
+                level,
+                manager,
+                s -> s.is(Items.IRON_INGOT) || s.is(Items.RAW_IRON) || s.is(ItemTags.IRON_ORES),
+                2
+        );
+        if (iron.getCount() >= 2) {
+            return new ItemStack(Items.IRON_SWORD);
+        } else if (!iron.isEmpty()) {
+            depositStack(level, manager, iron);
+        }
+
+        ItemStack stone = extractMatchingItem(
+                level,
+                manager,
+                s -> s.is(Items.COBBLESTONE) || s.is(Items.STONE) || s.is(ItemTags.STONE_CRAFTING_MATERIALS),
+                2
+        );
+        if (stone.getCount() >= 2) {
+            return new ItemStack(Items.STONE_SWORD);
+        } else if (!stone.isEmpty()) {
+            depositStack(level, manager, stone);
+        }
+
+        return new ItemStack(Items.WOODEN_SWORD);
     }
 
     public static ItemStack withdrawBuildingMaterial(ServerLevel level, CityZoneManager manager, int count) {

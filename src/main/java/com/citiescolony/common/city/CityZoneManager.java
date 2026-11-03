@@ -246,6 +246,18 @@ public class CityZoneManager extends SavedData {
         return true;
     }
 
+    public synchronized Optional<ZoneData> getAssignedZoneForCitizen(UUID citizenId) {
+        if (citizenId == null) {
+            return Optional.empty();
+        }
+        for (ZoneData zone : this.zones.values()) {
+            if (zone.assignedCitizens().contains(citizenId)) {
+                return Optional.of(zone);
+            }
+        }
+        return Optional.empty();
+    }
+
     public synchronized Optional<ColonyTask> pollNextTaskFor(JobType jobType, UUID citizenId, BlockPos citizenPos) {
         if (jobType == null || jobType == JobType.NONE || citizenId == null) {
             return Optional.empty();
@@ -259,7 +271,11 @@ public class CityZoneManager extends SavedData {
             return existingAssigned;
         }
 
-        Comparator<ColonyTask> comparator = Comparator.comparingInt(ColonyTask::priority).reversed();
+        Optional<ZoneData> assignedZoneOpt = getAssignedZoneForCitizen(citizenId);
+        Comparator<ColonyTask> comparator = Comparator.comparingInt((ColonyTask task) ->
+                assignedZoneOpt.map(zone -> zone.contains(task.targetPos()) ? 0 : 1).orElse(0)
+        ).thenComparing(Comparator.comparingInt(ColonyTask::priority).reversed());
+
         if (citizenPos != null) {
             comparator = comparator.thenComparingDouble(task -> task.targetPos().distSqr(citizenPos));
         }
