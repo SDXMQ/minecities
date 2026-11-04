@@ -35,8 +35,8 @@ import java.util.Set;
  */
 public final class RtsCameraController
 {
-    public static final double MIN_ALTITUDE = 15.0D;
-    public static final double MAX_ALTITUDE = 45.0D;
+    public static final double MIN_ALTITUDE = 12.0D;
+    public static final double MAX_ALTITUDE = 80.0D;
     public static final float MIN_PITCH = 45.0F;
     public static final float MAX_PITCH = 60.0F;
     private static final double BASE_PAN_SPEED = 0.85D;
@@ -91,6 +91,8 @@ public final class RtsCameraController
     private static BlockPos hoveredBuildingPos = null;
 
     private static final Set<Integer> selectedCitizenEntityIds = new LinkedHashSet<>();
+    private static double pivotFocusX = 0.0D;
+    private static double pivotFocusZ = 0.0D;
 
     private RtsCameraController()
     {
@@ -151,6 +153,11 @@ public final class RtsCameraController
     public static boolean isActive()
     {
         return active;
+    }
+
+    public static void setActiveForTesting(final boolean state)
+    {
+        active = state;
     }
 
     @NotNull
@@ -277,6 +284,7 @@ public final class RtsCameraController
             pitch = clampPitch(pitch);
             yaw = mc.player.getYRot();
             cameraPos = new Vec3(playerPos.x, playerPos.y + altitude, playerPos.z);
+            mc.player.setDeltaMovement(0.0D, mc.player.getDeltaMovement().y, 0.0D);
             mc.mouseHandler.releaseMouse();
             lastMouseX = mc.mouseHandler.xpos();
             lastMouseY = mc.mouseHandler.ypos();
@@ -428,12 +436,34 @@ public final class RtsCameraController
 
         if (mc.screen == null && GLFW.glfwGetMouseButton(window, GLFW.GLFW_MOUSE_BUTTON_MIDDLE) == GLFW.GLFW_PRESS)
         {
-            if (middleMouseDown)
+            if (!middleMouseDown)
+            {
+                final float curPitchRad = pitch * Mth.DEG_TO_RAD;
+                final float curYawRad = yaw * Mth.DEG_TO_RAD;
+                final double curHorizDist = altitude / Math.max(0.1D, Math.tan(curPitchRad));
+                pivotFocusX = cameraPos.x - curHorizDist * Mth.sin(curYawRad);
+                pivotFocusZ = cameraPos.z + curHorizDist * Mth.cos(curYawRad);
+            }
+            else
             {
                 final double dx = mouseX - lastMouseX;
                 final double dy = mouseY - lastMouseY;
                 yaw = (yaw + (float) (dx * 0.35D)) % 360.0F;
+                if (yaw < 0.0F)
+                {
+                    yaw += 360.0F;
+                }
                 pitch = clampPitch(pitch + (float) (dy * 0.25D));
+
+                final float newPitchRad = pitch * Mth.DEG_TO_RAD;
+                final float newYawRad = yaw * Mth.DEG_TO_RAD;
+                final double newHorizDist = altitude / Math.max(0.1D, Math.tan(newPitchRad));
+                final double baseY = mc.player != null ? mc.player.getY() : cameraPos.y - altitude;
+                cameraPos = new Vec3(
+                    pivotFocusX + newHorizDist * Mth.sin(newYawRad),
+                    baseY + altitude,
+                    pivotFocusZ - newHorizDist * Mth.cos(newYawRad)
+                );
             }
             middleMouseDown = true;
         }
@@ -495,13 +525,12 @@ public final class RtsCameraController
         }
     }
 
-    public static void onMovementInputUpdate(@NotNull final net.minecraftforge.client.event.MovementInputUpdateEvent event)
+    public static void suppressMovementInput(@NotNull final net.minecraft.client.player.Input input)
     {
         if (!active)
         {
             return;
         }
-        final net.minecraft.client.player.Input input = event.getInput();
         input.forwardImpulse = 0.0F;
         input.leftImpulse = 0.0F;
         input.up = false;
@@ -510,6 +539,21 @@ public final class RtsCameraController
         input.right = false;
         input.jumping = false;
         input.shiftKeyDown = false;
+    }
+
+    public static void onMovementInputUpdate(@NotNull final net.minecraftforge.client.event.MovementInputUpdateEvent event)
+    {
+        if (!active)
+        {
+            return;
+        }
+        suppressMovementInput(event.getInput());
+        final Entity player = event.getEntity();
+        if (player != null)
+        {
+            final Vec3 dm = player.getDeltaMovement();
+            player.setDeltaMovement(0.0D, dm.y, 0.0D);
+        }
     }
 
     public static void onMouseScroll(@NotNull final InputEvent.MouseScrollingEvent event)

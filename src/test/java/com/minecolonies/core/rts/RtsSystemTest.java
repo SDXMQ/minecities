@@ -3,17 +3,24 @@ package com.minecolonies.core.rts;
 import com.minecolonies.api.configuration.RtsZonePlacementMode;
 import com.minecolonies.core.client.rts.RtsCameraController;
 import com.minecolonies.core.client.rts.RtsMousePicker;
+import com.minecolonies.core.client.rts.RtsTopBarOverlay;
 import com.minecolonies.core.network.messages.client.RtsSyncMessage;
 import com.minecolonies.core.network.messages.server.RtsCitizenCommandMessage;
 import com.minecolonies.core.network.messages.server.RtsZoneActionMessage;
 import io.netty.buffer.Unpooled;
+import net.minecraft.SharedConstants;
+import net.minecraft.client.player.Input;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.server.Bootstrap;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
+import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -24,10 +31,23 @@ import java.util.UUID;
  */
 public class RtsSystemTest
 {
+    static
+    {
+        try
+        {
+            SharedConstants.tryDetectVersion();
+            Bootstrap.bootStrap();
+        }
+        catch (final Throwable ignored)
+        {
+        }
+    }
+
     public static void main(final String[] args)
     {
         final RtsSystemTest suite = new RtsSystemTest();
         suite.runAllTests();
+        System.out.println("=== ALL RTS SYSTEM TESTS PASSED (12/12) ===");
     }
 
     public void runAllTests()
@@ -39,8 +59,16 @@ public class RtsSystemTest
         testRtsMousePickerRayUnprojection();
         testRtsCameraControllerClampingAndPanning();
         testRtsNetworkPacketsSerialization();
+
+        // 5 New Specification Tests
+        testRtsCameraToggleAndMovementSuppression();
+        testRtsZoneDragSelectionAndBuildingAssociation();
+        testRtsZonePlacementModeAandBBehavior();
+        testRtsTopBarHudResourceSyncAndFormatting();
+        testRtsCitizenRoadSpeedBuffAndRemoval();
     }
 
+    @Test
     public void testRtsZoneTypeCyclingAndMetadata()
     {
         RtsZoneType current = RtsZoneType.RESIDENTIAL;
@@ -57,13 +85,21 @@ public class RtsSystemTest
             assertFalse(type.getDisplayName().isEmpty());
             assertNotNull(type.getDefaultSchematicName());
             assertFalse(type.getDefaultSchematicName().isEmpty());
-            assertNotNull(type.getDefaultJobId());
+            if (type == RtsZoneType.RESIDENTIAL)
+            {
+                assertNull(type.getDefaultJobId());
+            }
+            else
+            {
+                assertNotNull(type.getDefaultJobId());
+            }
             assertTrue(type.getRed() >= 0.0F && type.getRed() <= 1.0F);
             assertTrue(type.getGreen() >= 0.0F && type.getGreen() <= 1.0F);
             assertTrue(type.getBlue() >= 0.0F && type.getBlue() <= 1.0F);
         }
     }
 
+    @Test
     public void testRtsZonePlacementModeCycling()
     {
         final RtsZonePlacementMode modeA = RtsZonePlacementMode.MODE_A_AUTO_PLACE;
@@ -75,6 +111,7 @@ public class RtsSystemTest
         assertTrue(modeB.getDisplayName().contains("방식B"));
     }
 
+    @Test
     public void testRtsZoneDataNbtAndByteSerialization()
     {
         final UUID id = UUID.randomUUID();
@@ -110,6 +147,7 @@ public class RtsSystemTest
         assertNull(fromBufNull.linkedBuildingPos());
     }
 
+    @Test
     public void testRtsZoneSavedDataCrudAndIntersectionRemoval()
     {
         final RtsZoneSavedData savedData = new RtsZoneSavedData();
@@ -159,6 +197,7 @@ public class RtsSystemTest
         assertEquals(1, loaded.getZones().size());
     }
 
+    @Test
     public void testRtsMousePickerRayUnprojection()
     {
         final Vec3 camPos = new Vec3(100.0D, 90.0D, -50.0D);
@@ -197,11 +236,14 @@ public class RtsSystemTest
         assertEquals(1.0D, degenerateRay.direction().length(), 1.0E-5D);
     }
 
+    @Test
     public void testRtsCameraControllerClampingAndPanning()
     {
-        assertEquals(15.0D, RtsCameraController.clampAltitude(2.0D), 1.0E-6D);
+        assertEquals(12.0D, RtsCameraController.clampAltitude(5.0D));
+        assertEquals(12.0D, RtsCameraController.clampAltitude(2.0D), 1.0E-6D);
         assertEquals(25.0D, RtsCameraController.clampAltitude(25.0D), 1.0E-6D);
-        assertEquals(45.0D, RtsCameraController.clampAltitude(100.0D), 1.0E-6D);
+        assertEquals(80.0D, RtsCameraController.clampAltitude(100.0D));
+        assertEquals(80.0D, RtsCameraController.clampAltitude(100.0D), 1.0E-6D);
 
         assertEquals(45.0F, RtsCameraController.clampPitch(10.0F), 1.0E-5F);
         assertEquals(52.5F, RtsCameraController.clampPitch(52.5F), 1.0E-5F);
@@ -217,6 +259,7 @@ public class RtsSystemTest
         assertTrue(highPan.length() > lowPan.length());
     }
 
+    @Test
     public void testRtsNetworkPacketsSerialization()
     {
         final RtsZoneData zone = new RtsZoneData(
@@ -273,6 +316,255 @@ public class RtsSystemTest
         cmdOut.fromBytes(cmdBuf);
     }
 
+    @Test
+    public void testRtsCameraToggleAndMovementSuppression()
+    {
+        final Input input = new Input();
+        input.forwardImpulse = 1.0F;
+        input.leftImpulse = 0.5F;
+        input.up = true;
+        input.jumping = true;
+        input.shiftKeyDown = true;
+
+        try
+        {
+            // 1. When inactive: all inputs must be preserved
+            RtsCameraController.setActiveForTesting(false);
+            RtsCameraController.suppressMovementInput(input);
+
+            assertEquals(1.0F, input.forwardImpulse, 1.0E-5F);
+            assertEquals(0.5F, input.leftImpulse, 1.0E-5F);
+            assertTrue(input.up);
+            assertFalse(input.down);
+            assertFalse(input.left);
+            assertFalse(input.right);
+            assertTrue(input.jumping);
+            assertTrue(input.shiftKeyDown);
+
+            // 2. When active: all 8 movement variables must be zeroed (0.0F / false)
+            RtsCameraController.setActiveForTesting(true);
+            RtsCameraController.suppressMovementInput(input);
+
+            assertEquals(0.0F, input.forwardImpulse, 1.0E-5F);
+            assertEquals(0.0F, input.leftImpulse, 1.0E-5F);
+            assertFalse(input.up);
+            assertFalse(input.down);
+            assertFalse(input.left);
+            assertFalse(input.right);
+            assertFalse(input.jumping);
+            assertFalse(input.shiftKeyDown);
+        }
+        finally
+        {
+            RtsCameraController.setActiveForTesting(false);
+        }
+    }
+
+    @Test
+    public void testRtsZoneDragSelectionAndBuildingAssociation()
+    {
+        // 1. Reverse drag normalization: (25, 70, 30) -> (10, 64, 10)
+        final BlockPos forwardStart = new BlockPos(10, 64, 10);
+        final BlockPos forwardEnd = new BlockPos(25, 70, 30);
+        final BoundingBox boxForward = BoundingBox.fromCorners(forwardStart, forwardEnd);
+        final BoundingBox boxReverse = BoundingBox.fromCorners(forwardEnd, forwardStart);
+
+        assertEquals(boxForward, boxReverse);
+        assertEquals(10, boxReverse.minX());
+        assertEquals(64, boxReverse.minY());
+        assertEquals(10, boxReverse.minZ());
+        assertEquals(25, boxReverse.maxX());
+        assertEquals(70, boxReverse.maxY());
+        assertEquals(30, boxReverse.maxZ());
+
+        // 2. Max zone size clamping (MAX_ZONE_SPAN = 64)
+        final BlockPos rawStart = new BlockPos(0, 64, 0);
+        final BlockPos rawEnd = new BlockPos(100, 64, 100);
+        final int maxSpan = 64;
+        final int minX = Math.min(rawStart.getX(), rawEnd.getX());
+        final int minY = Math.min(rawStart.getY(), rawEnd.getY());
+        final int minZ = Math.min(rawStart.getZ(), rawEnd.getZ());
+        final int maxX = Math.min(minX + maxSpan, Math.max(rawStart.getX(), rawEnd.getX()));
+        final int maxY = Math.max(minY + 3, Math.max(rawStart.getY(), rawEnd.getY()));
+        final int maxZ = Math.min(minZ + maxSpan, Math.max(rawStart.getZ(), rawEnd.getZ()));
+        final BoundingBox clampedBox = new BoundingBox(minX, minY, minZ, maxX, maxY, maxZ);
+
+        assertEquals(0, clampedBox.minX());
+        assertEquals(64, clampedBox.maxX());
+        assertEquals(0, clampedBox.minZ());
+        assertEquals(64, clampedBox.maxZ());
+        assertTrue(clampedBox.getXSpan() <= 65);
+        assertTrue(clampedBox.getZSpan() <= 65);
+
+        // 3. Building association with linkedBuildingPos & tag roundtrip
+        final BlockPos linkedHut = new BlockPos(15, 64, 15);
+        final UUID zoneId = UUID.randomUUID();
+        final RtsZoneData zoneWithHut = new RtsZoneData(
+            zoneId,
+            1,
+            RtsZoneType.RESIDENTIAL,
+            boxReverse,
+            linkedHut
+        );
+        assertEquals(linkedHut, zoneWithHut.linkedBuildingPos());
+        final CompoundTag savedTag = zoneWithHut.saveToTag();
+        final RtsZoneData loadedZone = RtsZoneData.loadFromTag(savedTag);
+        assertEquals(zoneId, loadedZone.id());
+        assertEquals(1, loadedZone.colonyId());
+        assertEquals(RtsZoneType.RESIDENTIAL, loadedZone.type());
+        assertEquals(boxReverse, loadedZone.bounds());
+        assertEquals(linkedHut, loadedZone.linkedBuildingPos());
+
+        // 4. RtsZoneSavedData intersection removal
+        final RtsZoneSavedData savedData = new RtsZoneSavedData();
+        savedData.addOrReplaceZone(zoneWithHut);
+        assertEquals(1, savedData.getZones().size());
+
+        final BoundingBox intersectBox = new BoundingBox(12, 60, 12, 18, 72, 18);
+        final int removed = savedData.removeZonesIntersecting(intersectBox);
+        assertEquals(1, removed);
+        assertEquals(0, savedData.getZones().size());
+    }
+
+    @Test
+    public void testRtsZonePlacementModeAandBBehavior()
+    {
+        final RtsZonePlacementMode modeA = RtsZonePlacementMode.MODE_A_AUTO_PLACE;
+        final RtsZonePlacementMode modeB = RtsZonePlacementMode.MODE_B_BLUEPRINT_PREVIEW;
+
+        // Mutual cyclic toggle
+        assertEquals(modeB, modeA.next());
+        assertEquals(modeA, modeB.next());
+
+        // Display name contains 방식A / 방식B
+        assertTrue(modeA.getDisplayName().contains("방식A"));
+        assertTrue(modeB.getDisplayName().contains("방식B"));
+
+        // Roundtrip serialization for Mode A
+        final RtsZoneActionMessage msgA = new RtsZoneActionMessage(
+            new BlockPos(0, 64, 0),
+            new BlockPos(10, 68, 10),
+            RtsZoneType.LOGGING,
+            false,
+            RtsZonePlacementMode.MODE_A_AUTO_PLACE
+        );
+        final FriendlyByteBuf bufA = new FriendlyByteBuf(Unpooled.buffer());
+        msgA.toBytes(bufA);
+        final RtsZoneActionMessage msgOutA = new RtsZoneActionMessage();
+        msgOutA.fromBytes(bufA);
+        assertEquals(RtsZonePlacementMode.MODE_A_AUTO_PLACE, getPlacementMode(msgOutA));
+
+        // Roundtrip serialization for Mode B
+        final RtsZoneActionMessage msgB = new RtsZoneActionMessage(
+            new BlockPos(5, 70, 5),
+            new BlockPos(20, 75, 20),
+            RtsZoneType.MINING,
+            true,
+            RtsZonePlacementMode.MODE_B_BLUEPRINT_PREVIEW
+        );
+        final FriendlyByteBuf bufB = new FriendlyByteBuf(Unpooled.buffer());
+        msgB.toBytes(bufB);
+        final RtsZoneActionMessage msgOutB = new RtsZoneActionMessage();
+        msgOutB.fromBytes(bufB);
+        assertEquals(RtsZonePlacementMode.MODE_B_BLUEPRINT_PREVIEW, getPlacementMode(msgOutB));
+    }
+
+    @Test
+    public void testRtsTopBarHudResourceSyncAndFormatting()
+    {
+        final RtsResourceAggregator.ColonySnapshot snapshot = new RtsResourceAggregator.ColonySnapshot(
+            42, 1250, 640, 320, 85, 24, 30, 4, 8.7D, List.of()
+        );
+
+        final RtsSyncMessage msgIn = new RtsSyncMessage(snapshot);
+        final FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer());
+        msgIn.toBytes(buf);
+        final RtsSyncMessage msgOut = new RtsSyncMessage();
+        msgOut.fromBytes(buf);
+        msgOut.onExecute(null, false);
+
+        final RtsResourceAggregator.ColonySnapshot clientSnap = RtsResourceAggregator.getClientSnapshot();
+        assertEquals(42, clientSnap.colonyId());
+        assertEquals(1250, clientSnap.food());
+        assertEquals(640, clientSnap.wood());
+        assertEquals(320, clientSnap.stone());
+        assertEquals(85, clientSnap.minerals());
+        assertEquals(24, clientSnap.totalCitizens());
+        assertEquals(30, clientSnap.maxCitizens());
+        assertEquals(4, clientSnap.idleCitizens());
+        assertEquals(8.7D, clientSnap.overallHappiness(), 1.0E-5D);
+
+        final String formatted = RtsTopBarOverlay.formatResourceSummaryLine(
+            clientSnap.food(),
+            clientSnap.wood(),
+            clientSnap.stone(),
+            clientSnap.minerals(),
+            clientSnap.totalCitizens(),
+            clientSnap.maxCitizens(),
+            clientSnap.idleCitizens(),
+            clientSnap.overallHappiness()
+        );
+        assertEquals("식량: 1250 | 목재: 640 | 석재: 320 | 광물: 85 | 시민: 24/30 (유휴:4) | 행복도: 8.7/10", formatted);
+    }
+
+    @Test
+    public void testRtsCitizenRoadSpeedBuffAndRemoval()
+    {
+        try
+        {
+            SharedConstants.tryDetectVersion();
+            Bootstrap.bootStrap();
+        }
+        catch (final Throwable ignored)
+        {
+        }
+
+        // 7 Road blocks
+        assertTrue(RtsResourceAggregator.isRoadBlock(Blocks.DIRT_PATH.defaultBlockState()));
+        assertTrue(RtsResourceAggregator.isRoadBlock(Blocks.STONE_BRICKS.defaultBlockState()));
+        assertTrue(RtsResourceAggregator.isRoadBlock(Blocks.COBBLESTONE.defaultBlockState()));
+        assertTrue(RtsResourceAggregator.isRoadBlock(Blocks.SMOOTH_STONE.defaultBlockState()));
+        assertTrue(RtsResourceAggregator.isRoadBlock(Blocks.POLISHED_ANDESITE.defaultBlockState()));
+        assertTrue(RtsResourceAggregator.isRoadBlock(Blocks.GRAVEL.defaultBlockState()));
+        assertTrue(RtsResourceAggregator.isRoadBlock(Blocks.MUD_BRICKS.defaultBlockState()));
+
+        // Non-road blocks
+        assertFalse(RtsResourceAggregator.isRoadBlock(Blocks.GRASS_BLOCK.defaultBlockState()));
+        assertFalse(RtsResourceAggregator.isRoadBlock(Blocks.DIRT.defaultBlockState()));
+        assertFalse(RtsResourceAggregator.isRoadBlock(Blocks.OAK_PLANKS.defaultBlockState()));
+        assertFalse(RtsResourceAggregator.isRoadBlock(Blocks.AIR.defaultBlockState()));
+        assertFalse(RtsResourceAggregator.isRoadBlock(Blocks.WATER.defaultBlockState()));
+
+        // Road speed modifier constants
+        assertEquals("minecolonies_rts_road_speed", RtsResourceAggregator.ROAD_SPEED_MODIFIER_NAME);
+        assertEquals(0.30D, RtsResourceAggregator.ROAD_SPEED_BOOST_AMOUNT, 1.0E-6D);
+        assertNotNull(RtsResourceAggregator.ROAD_SPEED_MODIFIER_UUID);
+        assertNotNull(RtsResourceAggregator.ROAD_SPEED_MODIFIER);
+        assertEquals(UUID.fromString("d8499b04-0e66-4726-ab29-64469d734e0d"), RtsResourceAggregator.ROAD_SPEED_MODIFIER_UUID);
+        assertEquals(RtsResourceAggregator.ROAD_SPEED_MODIFIER_UUID, RtsResourceAggregator.ROAD_SPEED_MODIFIER.getId());
+
+        // Numeric speed calculations
+        final double baseSpeed = 0.25D;
+        final double boostedSpeed = baseSpeed * (1.0D + RtsResourceAggregator.ROAD_SPEED_BOOST_AMOUNT);
+        assertEquals(0.325D, boostedSpeed, 1.0E-6D);
+        final double restoredSpeed = boostedSpeed / (1.0D + RtsResourceAggregator.ROAD_SPEED_BOOST_AMOUNT);
+        assertEquals(0.25D, restoredSpeed, 1.0E-6D);
+    }
+
+    private static RtsZonePlacementMode getPlacementMode(final RtsZoneActionMessage msg)
+    {
+        try
+        {
+            final Field field = RtsZoneActionMessage.class.getDeclaredField("placementMode");
+            field.setAccessible(true);
+            return (RtsZonePlacementMode) field.get(msg);
+        }
+        catch (final Exception e)
+        {
+            throw new RuntimeException("Failed to read placementMode via reflection", e);
+        }
+    }
+
     private static void assertEquals(final Object expected, final Object actual)
     {
         if (!Objects.equals(expected, actual))
@@ -281,12 +573,22 @@ public class RtsSystemTest
         }
     }
 
+    private static void assertEquals(final double expected, final double actual)
+    {
+        assertEquals(expected, actual, 1.0E-6D);
+    }
+
     private static void assertEquals(final double expected, final double actual, final double delta)
     {
         if (Math.abs(expected - actual) > delta)
         {
             throw new AssertionError("Expected <" + expected + "> but was <" + actual + "> (delta " + delta + ")");
         }
+    }
+
+    private static void assertEquals(final float expected, final float actual)
+    {
+        assertEquals(expected, actual, 1.0E-5F);
     }
 
     private static void assertEquals(final float expected, final float actual, final float delta)

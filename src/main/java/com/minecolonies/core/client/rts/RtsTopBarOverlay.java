@@ -29,6 +29,23 @@ public final class RtsTopBarOverlay
         event.registerAbove(VanillaGuiOverlay.HOTBAR.id(), "rts_top_bar", OVERLAY);
     }
 
+    public static String formatResourceSummaryLine(
+        final int food,
+        final int wood,
+        final int stone,
+        final int minerals,
+        final int totalCitizens,
+        final int maxCitizens,
+        final int idleCitizens,
+        final double happiness)
+    {
+        return String.format(
+            java.util.Locale.ROOT,
+            "식량: %d | 목재: %d | 석재: %d | 광물: %d | 시민: %d/%d (유휴:%d) | 행복도: %.1f/10",
+            food, wood, stone, minerals, totalCitizens, maxCitizens, idleCitizens, happiness
+        );
+    }
+
     private static void renderOverlay(
         final ForgeGui gui,
         final GuiGraphics graphics,

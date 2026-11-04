@@ -54,7 +54,14 @@ import java.util.*;
 public final class RtsResourceAggregator
 {
     public static final String ROAD_SPEED_MODIFIER_NAME = "minecolonies_rts_road_speed";
-    private static final double ROAD_SPEED_BOOST_AMOUNT = 0.30D;
+    public static final double ROAD_SPEED_BOOST_AMOUNT = 0.30D;
+    public static final UUID ROAD_SPEED_MODIFIER_UUID = UUID.fromString("d8499b04-0e66-4726-ab29-64469d734e0d");
+    public static final AttributeModifier ROAD_SPEED_MODIFIER = new AttributeModifier(
+        ROAD_SPEED_MODIFIER_UUID,
+        ROAD_SPEED_MODIFIER_NAME,
+        ROAD_SPEED_BOOST_AMOUNT,
+        AttributeModifier.Operation.MULTIPLY_TOTAL
+    );
     private static final int MAX_ZONE_SPAN = 64;
 
     /**
@@ -377,12 +384,7 @@ public final class RtsResourceAggregator
             final BlockState belowFeet = level.getBlockState(feetPos.below());
             if (isRoadBlock(atFeet) || isRoadBlock(belowFeet))
             {
-                final AttributeModifier modifier = new AttributeModifier(
-                    ROAD_SPEED_MODIFIER_NAME,
-                    ROAD_SPEED_BOOST_AMOUNT,
-                    AttributeModifier.Operation.MULTIPLY_TOTAL
-                );
-                AttributeModifierUtils.addModifier(citizen, modifier, Attributes.MOVEMENT_SPEED);
+                AttributeModifierUtils.addModifier(citizen, ROAD_SPEED_MODIFIER, Attributes.MOVEMENT_SPEED);
             }
             else
             {
@@ -442,6 +444,33 @@ public final class RtsResourceAggregator
 
         if (deleteMode)
         {
+            final List<RtsZoneData> intersecting = savedData.getZones().stream()
+                .filter(z -> z.intersects(box))
+                .toList();
+
+            for (final RtsZoneData zone : intersecting)
+            {
+                final BlockPos hutPos = zone.linkedBuildingPos();
+                if (hutPos != null && WorldUtil.isBlockLoaded(level, hutPos))
+                {
+                    if (colony != null)
+                    {
+                        final IBuilding building = colony.getServerBuildingManager().getBuilding(hutPos);
+                        if (building != null && building.getBuildingLevel() == 0)
+                        {
+                            building.removeWorkOrder();
+                            building.destroy();
+                        }
+                    }
+                    final BlockState state = level.getBlockState(hutPos);
+                    if (state.getBlock() instanceof com.minecolonies.api.blocks.AbstractBlockHut
+                        || level.getBlockEntity(hutPos) instanceof AbstractTileEntityColonyBuilding)
+                    {
+                        level.removeBlock(hutPos, false);
+                    }
+                }
+            }
+
             final int removed = savedData.removeZonesIntersecting(box);
             player.displayClientMessage(Component.literal("[RTS] 구역 " + removed + "개 해제됨"), true);
             syncPlayerColonySnapshot(level, player);
@@ -499,6 +528,13 @@ public final class RtsResourceAggregator
         }
 
         final Block hutBlock = zoneType.getDefaultHutBlock();
+        final String stylePack = colony != null ? colony.getStructurePack() : "Caledonia";
+        final String schematic = zoneType.getDefaultSchematicName();
+        final String mappedPath = com.minecolonies.api.compatibility.newstruct.BlueprintMapping.getPathMapping(stylePack, schematic);
+        final String fallbackPath = com.minecolonies.api.compatibility.newstruct.BlueprintMapping.getPathMapping("", schematic);
+        final String bpRelative = mappedPath != null ? mappedPath : (fallbackPath != null ? fallbackPath : schematic);
+        final String blueprintPath = bpRelative.endsWith(".blueprint") ? bpRelative : bpRelative + "1.blueprint";
+
         final BlockState existing = level.getBlockState(hutPos);
         if (existing.isAir() || existing.canBeReplaced())
         {
@@ -517,8 +553,8 @@ public final class RtsResourceAggregator
                 level.setBlockEntity(buildingTe);
             }
 
-            final String stylePack = colony != null ? colony.getStructurePack() : "Caledonia";
             buildingTe.setPackName(stylePack);
+            buildingTe.setBlueprintPath(blueprintPath);
             hutBlock.setPlacedBy(level, hutPos, hutState, player, new ItemStack(hutBlock));
         }
 
@@ -531,6 +567,8 @@ public final class RtsResourceAggregator
             }
             if (building != null)
             {
+                building.setStructurePack(stylePack);
+                building.setBlueprintPath(blueprintPath);
                 configureZoneSpecificBuilding(colony, building, zoneType, box, hutPos);
                 if (building.getBuildingLevel() == 0 && !building.isPendingConstruction())
                 {
@@ -621,6 +659,11 @@ public final class RtsResourceAggregator
 
             if (targetPos != null && entityCitizen != null)
             {
+                if (citizenData != null && citizenData.getJob() != null
+                    && citizenData.getJob().getWorkerAI() instanceof com.minecolonies.core.entity.ai.workers.AbstractEntityAIBasic<?> workerAi)
+                {
+                    workerAi.setDelay(20 * 10); // 10초간 작업 AI가 길찾기를 덮어쓰지 않도록 유예
+                }
                 entityCitizen.getNavigation().moveTo(
                     targetPos.getX() + 0.5D,
                     targetPos.getY(),
