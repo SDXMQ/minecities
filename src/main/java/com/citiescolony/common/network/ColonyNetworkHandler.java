@@ -2,6 +2,7 @@ package com.citiescolony.common.network;
 
 import com.citiescolony.api.ZoneData;
 import com.citiescolony.common.city.CityZoneManager;
+import com.citiescolony.common.city.MineColoniesBridge;
 import com.citiescolony.common.city.StorageLogisticsHelper;
 import com.citiescolony.common.entity.ColonyCitizenEntity;
 import net.minecraft.core.BlockPos;
@@ -99,9 +100,12 @@ public final class ColonyNetworkHandler {
             ServerLevel level = player.level();
             CityZoneManager manager = CityZoneManager.get(level);
             if (payload.deleteMode()) {
+                ZoneData temp = ZoneData.fromCorners(payload.zoneType(), payload.startPos(), payload.endPos());
                 manager.removeZonesIntersecting(bounds);
+                MineColoniesBridge.syncZoneWithMineColonies(level, temp, true);
             } else {
-                manager.createZone(payload.zoneType(), payload.startPos(), payload.endPos());
+                ZoneData created = manager.createZone(payload.zoneType(), payload.startPos(), payload.endPos());
+                MineColoniesBridge.syncZoneWithMineColonies(level, created, false);
             }
             StorageLogisticsHelper.refreshStorageCache(level, manager);
             broadcastCitySync(level, manager);
@@ -131,6 +135,7 @@ public final class ColonyNetworkHandler {
                     citizen.issuePlayerCommand(level, targetPos);
                 }
             }
+            MineColoniesBridge.forwardCitizenCommandToMineColonies(level, ids, targetPos, null);
             CityZoneManager manager = CityZoneManager.get(level);
             broadcastCitySync(level, manager);
         });
@@ -194,16 +199,15 @@ public final class ColonyNetworkHandler {
     }
 
     public static void broadcastResourceHudSync(ServerLevel level, CityZoneManager manager) {
-        StorageLogisticsHelper.ResourceSummary resources = StorageLogisticsHelper.computeResourceSummary(level, manager);
+        ServerLevel overworld = level.getServer().overworld();
+        StorageLogisticsHelper.ResourceSummary resources = StorageLogisticsHelper.computeResourceSummary(overworld, manager);
         int totalCitizens = 0;
         int idleCitizens = 0;
 
-        for (Entity entity : level.getAllEntities()) {
-            if (entity instanceof ColonyCitizenEntity citizen && citizen.isAlive()) {
-                totalCitizens++;
-                if (citizen.isCitizenIdle()) {
-                    idleCitizens++;
-                }
+        for (ColonyCitizenEntity citizen : manager.getActiveCitizens()) {
+            totalCitizens++;
+            if (citizen.isCitizenIdle()) {
+                idleCitizens++;
             }
         }
 
@@ -215,6 +219,6 @@ public final class ColonyNetworkHandler {
                 totalCitizens,
                 idleCitizens
         );
-        PacketDistributor.sendToPlayersInDimension(level, payload);
+        PacketDistributor.sendToPlayersInDimension(overworld, payload);
     }
 }

@@ -60,6 +60,7 @@ public class FMLEventHandler
     public static void onWorldTick(final TickEvent.LevelTickEvent event)
     {
         IColonyManager.getInstance().onWorldTick(event);
+        com.minecolonies.core.rts.RtsResourceAggregator.onWorldTick(event);
     }
 
     @SubscribeEvent

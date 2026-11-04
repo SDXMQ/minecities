@@ -11,6 +11,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.client.event.InputEvent;
+import net.neoforged.neoforge.client.event.MovementInputUpdateEvent;
 import net.neoforged.neoforge.client.event.ViewportEvent;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
@@ -183,6 +184,21 @@ public final class RtsCameraController {
             strafe -= 1.0D;
         }
 
+        // Suppress vanilla movement keys so the player body does not walk while panning the RTS camera
+        if (mc.options != null) {
+            mc.options.keyUp.setDown(false);
+            mc.options.keyDown.setDown(false);
+            mc.options.keyLeft.setDown(false);
+            mc.options.keyRight.setDown(false);
+            mc.options.keyJump.setDown(false);
+            mc.options.keySprint.setDown(false);
+            mc.options.keyShift.setDown(false);
+        }
+        if (mc.player != null) {
+            Vec3 vel = mc.player.getDeltaMovement();
+            mc.player.setDeltaMovement(0.0D, vel.y, 0.0D);
+        }
+
         if (forward != 0.0D || strafe != 0.0D) {
             double length = Math.sqrt(forward * forward + strafe * strafe);
             forward /= length;
@@ -197,6 +213,21 @@ public final class RtsCameraController {
             double dz = (cos * forward - sin * strafe) * speedScale;
 
             focusPosition = focusPosition.add(dx, 0.0D, dz);
+        }
+    }
+
+    /**
+     * Blocks vanilla player movement input while RTS camera mode is active so WASD only moves the RTS camera.
+     */
+    public static void onMovementInputUpdate(MovementInputUpdateEvent event) {
+        if (!active) {
+            return;
+        }
+        var input = event.getInput();
+        input.moveVector = net.minecraft.world.phys.Vec2.ZERO;
+        if (event.getEntity() != null) {
+            Vec3 vel = event.getEntity().getDeltaMovement();
+            event.getEntity().setDeltaMovement(0.0D, vel.y, 0.0D);
         }
     }
 

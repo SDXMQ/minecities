@@ -112,6 +112,8 @@ public class ServerConfiguration extends AbstractConfiguration
      *  --------------------------------------------------------------------------------- */
 
     public final ForgeConfigSpec.BooleanValue creativeResolve;
+    public final ForgeConfigSpec.EnumValue<RtsZonePlacementMode> rtsZonePlacementMode;
+    public final ForgeConfigSpec.BooleanValue rtsRoadSpeedBoost;
 
     /**
      * Builds server configuration.
@@ -140,6 +142,8 @@ public class ServerConfiguration extends AbstractConfiguration
         maxTreeSize = defineInteger(builder, "maxtreesize", 400, 1, 1000);
         noSupplyPlacementRestrictions = defineBoolean(builder, "nosupplyplacementrestrictions", false);
         skyRaiders = defineBoolean(builder, "skyraiders", false);
+        rtsZonePlacementMode = defineEnum(builder, "rtszoneplacementmode", RtsZonePlacementMode.MODE_A_AUTO_PLACE);
+        rtsRoadSpeedBoost = defineBoolean(builder, "rtsroadspeedboost", true);
 
         swapToCategory(builder, "research");
         researchCreativeCompletion = defineBoolean(builder, "researchcreativecompletion", true);

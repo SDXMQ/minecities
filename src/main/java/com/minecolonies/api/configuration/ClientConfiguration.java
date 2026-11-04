@@ -14,6 +14,8 @@ public class ClientConfiguration extends AbstractConfiguration
     public final ForgeConfigSpec.BooleanValue colonyteamborders;
     public final ForgeConfigSpec.BooleanValue holidayFeatures;
     public final ForgeConfigSpec.BooleanValue showdyetooltips;
+    public final ForgeConfigSpec.EnumValue<RtsZonePlacementMode> rtsZonePlacementMode;
+    public final ForgeConfigSpec.BooleanValue rtsHybridRightClickModeB;
 
     /**
      * Builds client configuration.
@@ -30,6 +32,8 @@ public class ClientConfiguration extends AbstractConfiguration
         colonyteamborders = defineBoolean(builder, "colonyteamborders", true);
         holidayFeatures = defineBoolean(builder, "holidayfeatures", true);
         showdyetooltips = defineBoolean(builder, "showdyetooltips", true);
+        rtsZonePlacementMode = defineEnum(builder, "rtszoneplacementmode", RtsZonePlacementMode.MODE_A_AUTO_PLACE);
+        rtsHybridRightClickModeB = defineBoolean(builder, "rtshybridrightclickmodeb", true);
 
         swapToCategory(builder, "pathfinding");
 

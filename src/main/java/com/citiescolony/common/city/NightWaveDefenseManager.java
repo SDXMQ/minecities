@@ -7,6 +7,8 @@ import net.minecraft.world.Difficulty;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -16,14 +18,13 @@ import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Spawns and directs night monster waves against the city Town Hall when world time reaches night (>= 13000 ticks).
- * Wave size scales proportionally to the colony citizen population and city zone development count.
+ * Stores wave state inside world-scoped CityZoneManager (SavedData) instead of static maps to prevent
+ * cross-world state pollution in singleplayer, and boosts monster FOLLOW_RANGE to cover large city radii.
  */
 public final class NightWaveDefenseManager {
     public static final long NIGHT_START_TIME = 13000L;
@@ -31,14 +32,13 @@ public final class NightWaveDefenseManager {
     private static final int PERIMETER_SPAWN_MARGIN = 18;
     private static final int MARCH_UPDATE_INTERVAL_TICKS = 40;
 
-    private static final Map<String, Long> LAST_SPAWNED_DAY_BY_DIMENSION = new ConcurrentHashMap<>();
-    private static final Map<String, List<UUID>> ACTIVE_WAVE_MOBS = new ConcurrentHashMap<>();
-
     private NightWaveDefenseManager() {
     }
 
     public static void tick(ServerLevel level, int citizenCount) {
-        if (level.isClientSide() || level.getDifficulty() == Difficulty.PEACEFUL) {
+        if (level.isClientSide()
+                || level != level.getServer().overworld()
+                || level.getDifficulty() == Difficulty.PEACEFUL) {
             return;
         }
         CityZoneManager manager = CityZoneManager.get(level);
@@ -50,18 +50,17 @@ public final class NightWaveDefenseManager {
 
         long dayTime = level.getDayTime() % 24000L;
         long currentDayNumber = level.getDayTime() / 24000L;
-        String dimKey = level.dimension().identifier().toString();
 
         if (dayTime >= NIGHT_START_TIME && dayTime <= NIGHT_END_TIME) {
-            Long lastSpawnedDay = LAST_SPAWNED_DAY_BY_DIMENSION.get(dimKey);
-            if (lastSpawnedDay == null || lastSpawnedDay < currentDayNumber) {
-                LAST_SPAWNED_DAY_BY_DIMENSION.put(dimKey, currentDayNumber);
+            long lastSpawnedDay = manager.getLastSpawnedWaveDay();
+            if (lastSpawnedDay < currentDayNumber) {
+                manager.setLastSpawnedWaveDay(currentDayNumber);
                 spawnNightWave(level, manager, townHallPos, citizenCount);
             }
         }
 
         if ((level.getGameTime() % MARCH_UPDATE_INTERVAL_TICKS) == 0L) {
-            directActiveWaveMonsters(level, townHallPos);
+            directActiveWaveMonsters(level, manager, townHallPos);
         }
     }
 
@@ -81,8 +80,6 @@ public final class NightWaveDefenseManager {
         int totalMonsters = computeWaveMonsterCount(citizenCount, manager.getZones().size());
         RandomSource random = level.getRandom();
         List<Monster> spawned = new ArrayList<>(totalMonsters);
-        String dimKey = level.dimension().identifier().toString();
-        List<UUID> trackedIds = ACTIVE_WAVE_MOBS.computeIfAbsent(dimKey, k -> new ArrayList<>());
 
         int radiusX = Math.max(16, (cityBounds.getXSpan() / 2) + PERIMETER_SPAWN_MARGIN);
         int radiusZ = Math.max(16, (cityBounds.getZSpan() / 2) + PERIMETER_SPAWN_MARGIN);
@@ -105,15 +102,43 @@ public final class NightWaveDefenseManager {
             }
             monster.snapTo(spawnPos.getX() + 0.5D, spawnPos.getY(), spawnPos.getZ() + 0.5D, random.nextFloat() * 360.0F, 0.0F);
             monster.setPersistenceRequired();
+
+            // Expand FOLLOW_RANGE beyond the distance from spawnPos to townHallPos so navigation never fails on large cities
+            double distToTownHall = Math.sqrt(spawnPos.distSqr(townHallPos));
+            AttributeInstance followRange = monster.getAttribute(Attributes.FOLLOW_RANGE);
+            if (followRange != null) {
+                followRange.setBaseValue(Math.max(64.0D, distToTownHall + 32.0D));
+            }
             monster.restrictTo(townHallPos, 12);
 
             if (level.addFreshEntity(monster)) {
-                monster.getNavigation().moveTo(townHallPos.getX() + 0.5D, townHallPos.getY(), townHallPos.getZ() + 0.5D, 1.15D);
+                issueMarchOrderTowardTownHall(monster, townHallPos);
                 spawned.add(monster);
-                trackedIds.add(monster.getUUID());
+                manager.addActiveWaveMob(monster.getUUID());
             }
         }
         return spawned;
+    }
+
+    private static void issueMarchOrderTowardTownHall(Monster monster, BlockPos townHallPos) {
+        double dx = (townHallPos.getX() + 0.5D) - monster.getX();
+        double dy = townHallPos.getY() - monster.getY();
+        double dz = (townHallPos.getZ() + 0.5D) - monster.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+
+        AttributeInstance followRange = monster.getAttribute(Attributes.FOLLOW_RANGE);
+        if (followRange != null && followRange.getBaseValue() < dist + 24.0D) {
+            followRange.setBaseValue(Math.max(64.0D, dist + 32.0D));
+        }
+
+        if (!monster.getNavigation().moveTo(townHallPos.getX() + 0.5D, townHallPos.getY(), townHallPos.getZ() + 0.5D, 1.15D)
+                && dist > 24.0D) {
+            double stepScale = 24.0D / dist;
+            double wpX = monster.getX() + dx * stepScale;
+            double wpY = monster.getY() + dy * stepScale;
+            double wpZ = monster.getZ() + dz * stepScale;
+            monster.getNavigation().moveTo(wpX, wpY, wpZ, 1.15D);
+        }
     }
 
     private static Monster createWaveMonster(ServerLevel level, RandomSource random, int index) {
@@ -137,28 +162,29 @@ public final class NightWaveDefenseManager {
         return monster;
     }
 
-    private static void directActiveWaveMonsters(ServerLevel level, BlockPos townHallPos) {
-        String dimKey = level.dimension().identifier().toString();
-        List<UUID> tracked = ACTIVE_WAVE_MOBS.get(dimKey);
-        if (tracked == null || tracked.isEmpty()) {
-            return;
-        }
-        Iterator<UUID> iterator = tracked.iterator();
-        while (iterator.hasNext()) {
-            UUID id = iterator.next();
-            if (!(level.getEntity(id) instanceof Monster monster) || !monster.isAlive()) {
-                iterator.remove();
-                continue;
+    private static void directActiveWaveMonsters(ServerLevel level, CityZoneManager manager, BlockPos townHallPos) {
+        synchronized (manager) {
+            List<UUID> tracked = manager.getMutableActiveWaveMobIds();
+            if (tracked.isEmpty()) {
+                return;
             }
-            if (monster.getTarget() == null && monster.getNavigation().isDone()) {
-                if (monster.blockPosition().distSqr(townHallPos) > 9.0D) {
-                    monster.getNavigation().moveTo(
-                            townHallPos.getX() + 0.5D,
-                            townHallPos.getY(),
-                            townHallPos.getZ() + 0.5D,
-                            1.15D
-                    );
+            boolean removedAny = false;
+            Iterator<UUID> iterator = tracked.iterator();
+            while (iterator.hasNext()) {
+                UUID id = iterator.next();
+                if (!(level.getEntity(id) instanceof Monster monster) || !monster.isAlive()) {
+                    iterator.remove();
+                    removedAny = true;
+                    continue;
                 }
+                if (monster.getTarget() == null && monster.getNavigation().isDone()) {
+                    if (monster.blockPosition().distSqr(townHallPos) > 9.0D) {
+                        issueMarchOrderTowardTownHall(monster, townHallPos);
+                    }
+                }
+            }
+            if (removedAny) {
+                manager.setDirty();
             }
         }
     }

@@ -1,5 +1,6 @@
 package com.minecolonies.api.client;
 
+import com.minecolonies.core.client.rts.RtsKeyMappings;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.KeyMapping;
 import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
@@ -26,6 +27,7 @@ public class ModKeyMappings
     public static void register(@NotNull final RegisterKeyMappingsEvent event)
     {
         event.register(TOGGLE_GOGGLES.get());
+        RtsKeyMappings.register(event);
     }
 
     /**

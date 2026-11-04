@@ -2,11 +2,13 @@ package com.citiescolony.common.city;
 
 import com.citiescolony.api.ZoneData;
 import com.citiescolony.api.ZoneType;
+import com.citiescolony.common.entity.CitizenInventory;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.world.Container;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -16,6 +18,7 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
+import net.minecraft.world.phys.AABB;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -28,8 +31,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 
 /**
- * Caches storage container positions inside STORAGE zones and handles automated
- * item deposits, equipment/material withdrawals, and city-wide resource accounting.
+ * Caches storage container positions inside STORAGE zones as well as drop-off chests inside/around
+ * production zones (LOGGING, MINING, FARMING). Handles automated item deposits, courier bulk transport,
+ * equipment/material withdrawals, and city-wide resource accounting.
  */
 public final class StorageLogisticsHelper {
 
@@ -37,7 +41,12 @@ public final class StorageLogisticsHelper {
         public static final ResourceSummary EMPTY = new ResourceSummary(0, 0, 0, 0);
     }
 
-    private record CachedStorageState(long zoneRevision, long lastScanTick, List<BlockPos> chestPositions) {
+    private record CachedStorageState(
+            long zoneRevision,
+            long lastScanTick,
+            List<BlockPos> chestPositions,
+            List<BlockPos> dropOffPositions
+    ) {
     }
 
     private static final long CACHE_TTL_TICKS = 100L;
@@ -47,6 +56,18 @@ public final class StorageLogisticsHelper {
     }
 
     public static List<BlockPos> getCachedChestPositions(ServerLevel level, CityZoneManager manager) {
+        return getOrRefreshCache(level, manager).chestPositions();
+    }
+
+    /**
+     * Returns cached drop-off chest positions located inside or on the 1-block perimeter of production zones
+     * (LOGGING, MINING, FARMING) that are not already part of a main STORAGE zone.
+     */
+    public static List<BlockPos> getCachedDropOffPositions(ServerLevel level, CityZoneManager manager) {
+        return getOrRefreshCache(level, manager).dropOffPositions();
+    }
+
+    private static CachedStorageState getOrRefreshCache(ServerLevel level, CityZoneManager manager) {
         String key = level.dimension().identifier().toString();
         long now = level.getGameTime();
         long revision = manager.getZoneRevision();
@@ -55,13 +76,18 @@ public final class StorageLogisticsHelper {
         if (cached != null
                 && cached.zoneRevision() == revision
                 && (now - cached.lastScanTick()) < CACHE_TTL_TICKS) {
-            return cached.chestPositions();
+            return cached;
         }
-        return refreshStorageCache(level, manager);
+        return refreshStorageCacheState(level, manager);
     }
 
     public static List<BlockPos> refreshStorageCache(ServerLevel level, CityZoneManager manager) {
-        Set<BlockPos> discovered = new LinkedHashSet<>();
+        return refreshStorageCacheState(level, manager).chestPositions();
+    }
+
+    private static CachedStorageState refreshStorageCacheState(ServerLevel level, CityZoneManager manager) {
+        Set<BlockPos> mainStorageChests = new LinkedHashSet<>();
+        Set<BlockPos> dropOffChests = new LinkedHashSet<>();
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
 
         for (ZoneData zone : manager.getZonesByType(ZoneType.STORAGE)) {
@@ -74,17 +100,45 @@ public final class StorageLogisticsHelper {
                             continue;
                         }
                         if (getStorageContainerAt(level, cursor).isPresent()) {
-                            discovered.add(cursor.immutable());
+                            mainStorageChests.add(cursor.immutable());
                         }
                     }
                 }
             }
         }
 
-        List<BlockPos> immutableList = Collections.unmodifiableList(new ArrayList<>(discovered));
+        for (ZoneData zone : manager.getZones()) {
+            ZoneType type = zone.type();
+            if (type != ZoneType.LOGGING && type != ZoneType.MINING && type != ZoneType.FARMING) {
+                continue;
+            }
+            BoundingBox box = zone.bounds();
+            for (int y = box.minY(); y <= box.maxY(); y++) {
+                for (int x = box.minX() - 1; x <= box.maxX() + 1; x++) {
+                    for (int z = box.minZ() - 1; z <= box.maxZ() + 1; z++) {
+                        cursor.set(x, y, z);
+                        if (!level.isLoaded(cursor) || mainStorageChests.contains(cursor)) {
+                            continue;
+                        }
+                        if (getStorageContainerAt(level, cursor).isPresent()) {
+                            dropOffChests.add(cursor.immutable());
+                        }
+                    }
+                }
+            }
+        }
+
+        List<BlockPos> immutableMain = Collections.unmodifiableList(new ArrayList<>(mainStorageChests));
+        List<BlockPos> immutableDropOff = Collections.unmodifiableList(new ArrayList<>(dropOffChests));
+        CachedStorageState state = new CachedStorageState(
+                manager.getZoneRevision(),
+                level.getGameTime(),
+                immutableMain,
+                immutableDropOff
+        );
         String key = level.dimension().identifier().toString();
-        LEVEL_CHEST_CACHE.put(key, new CachedStorageState(manager.getZoneRevision(), level.getGameTime(), immutableList));
-        return immutableList;
+        LEVEL_CHEST_CACHE.put(key, state);
+        return state;
     }
 
     public static Optional<Container> getStorageContainerAt(ServerLevel level, BlockPos pos) {
@@ -114,11 +168,44 @@ public final class StorageLogisticsHelper {
             BlockPos origin,
             ItemStack sampleStack
     ) {
-        List<BlockPos> chests = getCachedChestPositions(level, manager);
+        return findNearestContainerInListWithSpace(level, getCachedChestPositions(level, manager), origin, sampleStack);
+    }
+
+    /**
+     * For production workers (LUMBERJACK, MINER, FARMER), prefers a nearby production drop-off chest first
+     * so workers return to harvesting immediately while COURIER citizens haul bulk items to main STORAGE.
+     */
+    public static Optional<BlockPos> findNearestDropOffOrStorageWithSpace(
+            ServerLevel level,
+            CityZoneManager manager,
+            BlockPos origin,
+            ItemStack sampleStack,
+            boolean allowDropOff
+    ) {
+        if (allowDropOff) {
+            Optional<BlockPos> dropOff = findNearestContainerInListWithSpace(
+                    level,
+                    getCachedDropOffPositions(level, manager),
+                    origin,
+                    sampleStack
+            );
+            if (dropOff.isPresent()) {
+                return dropOff;
+            }
+        }
+        return findNearestStorageWithSpace(level, manager, origin, sampleStack);
+    }
+
+    private static Optional<BlockPos> findNearestContainerInListWithSpace(
+            ServerLevel level,
+            List<BlockPos> candidates,
+            BlockPos origin,
+            ItemStack sampleStack
+    ) {
         BlockPos bestPos = null;
         double bestDistSqr = Double.MAX_VALUE;
 
-        for (BlockPos pos : chests) {
+        for (BlockPos pos : candidates) {
             Optional<Container> containerOpt = getStorageContainerAt(level, pos);
             if (containerOpt.isEmpty()) {
                 continue;
@@ -141,12 +228,111 @@ public final class StorageLogisticsHelper {
                 return true;
             }
             if (!stack.isEmpty()
-                    && ItemStack.isSameItemSameComponents(inSlot, stack)
-                    && inSlot.getCount() < Math.min(inSlot.getMaxStackSize(), container.getMaxStackSize())) {
+                && ItemStack.isSameItemSameComponents(inSlot, stack)
+                && inSlot.getCount() < Math.min(inSlot.getMaxStackSize(), container.getMaxStackSize())) {
                 return true;
             }
         }
         return false;
+    }
+
+    public static boolean hasAnyNonEmptyItem(Container container) {
+        for (int i = 0; i < container.getContainerSize(); i++) {
+            if (!container.getItem(i).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Collects items from a production drop-off container and/or nearby dropped ItemEntities on the ground
+     * into the courier's inventory for bulk transport to main STORAGE.
+     */
+    public static int collectCourierPickupAt(
+            ServerLevel level,
+            BlockPos pickupPos,
+            CitizenInventory courierInventory
+    ) {
+        int collectedCount = 0;
+        Optional<Container> containerOpt = getStorageContainerAt(level, pickupPos);
+        if (containerOpt.isPresent()) {
+            Container container = containerOpt.get();
+            boolean changed = false;
+            for (int i = 0; i < container.getContainerSize(); i++) {
+                ItemStack inSlot = container.getItem(i);
+                if (inSlot.isEmpty()) {
+                    continue;
+                }
+                int before = inSlot.getCount();
+                ItemStack remainder = courierInventory.insertStack(inSlot);
+                int moved = before - remainder.getCount();
+                if (moved > 0) {
+                    container.setItem(i, remainder);
+                    collectedCount += moved;
+                    changed = true;
+                }
+                if (courierInventory.isFull()) {
+                    break;
+                }
+            }
+            if (changed) {
+                container.setChanged();
+            }
+        }
+
+        if (!courierInventory.isFull()) {
+            AABB pickupBox = new AABB(pickupPos).inflate(3.5D, 2.0D, 3.5D);
+            List<ItemEntity> groundItems = level.getEntitiesOfClass(
+                    ItemEntity.class,
+                    pickupBox,
+                    item -> item.isAlive() && !item.getItem().isEmpty()
+            );
+            for (ItemEntity itemEntity : groundItems) {
+                ItemStack groundStack = itemEntity.getItem();
+                int before = groundStack.getCount();
+                ItemStack remainder = courierInventory.insertStack(groundStack);
+                int moved = before - remainder.getCount();
+                if (moved > 0) {
+                    collectedCount += moved;
+                    if (remainder.isEmpty()) {
+                        itemEntity.discard();
+                    } else {
+                        itemEntity.setItem(remainder);
+                    }
+                }
+                if (courierInventory.isFull()) {
+                    break;
+                }
+            }
+        }
+        return collectedCount;
+    }
+
+    /**
+     * Deposits the given ItemStack into a preferred container (e.g. a production drop-off chest) first,
+     * falling back to main STORAGE chests for any remainder.
+     */
+    public static ItemStack depositStackToTargetOrMainStorage(
+            ServerLevel level,
+            CityZoneManager manager,
+            BlockPos targetContainerPos,
+            ItemStack stack
+    ) {
+        if (stack == null || stack.isEmpty()) {
+            return ItemStack.EMPTY;
+        }
+        ItemStack remaining = stack.copy();
+        if (targetContainerPos != null) {
+            Optional<Container> targetOpt = getStorageContainerAt(level, targetContainerPos);
+            if (targetOpt.isPresent()) {
+                remaining = insertIntoContainer(targetOpt.get(), remaining);
+            }
+        }
+        if (!remaining.isEmpty()) {
+            remaining = depositStack(level, manager, remaining);
+        }
+        return remaining;
     }
 
     /**

@@ -277,6 +277,11 @@ public class NetworkChannel
 
         // Item Setting Messages
         registerMessage(++idx, ItemSettingMessage.class, ItemSettingMessage::new);
+
+        // RTS Mode Messages
+        registerMessage(++idx, RtsSyncMessage.class, RtsSyncMessage::new);
+        registerMessage(++idx, RtsZoneActionMessage.class, RtsZoneActionMessage::new);
+        registerMessage(++idx, RtsCitizenCommandMessage.class, RtsCitizenCommandMessage::new);
     }
 
     private void setupInternalMessages()

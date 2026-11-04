@@ -385,4 +385,11 @@ public class ClientRegistryHandler
     {
         ModKeyMappings.register(event);
     }
+
+    @OnlyIn(Dist.CLIENT)
+    @SubscribeEvent
+    public static void registerGuiOverlays(@NotNull final net.minecraftforge.client.event.RegisterGuiOverlaysEvent event)
+    {
+        com.minecolonies.core.client.rts.RtsTopBarOverlay.onRegisterGuiOverlays(event);
+    }
 }

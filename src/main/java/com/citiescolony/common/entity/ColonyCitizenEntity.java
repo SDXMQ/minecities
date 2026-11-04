@@ -5,6 +5,7 @@ import com.citiescolony.api.ColonyTask;
 import com.citiescolony.api.JobType;
 import com.citiescolony.api.ZoneData;
 import com.citiescolony.common.city.CityZoneManager;
+import com.citiescolony.common.city.StorageLogisticsHelper;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
@@ -39,10 +40,11 @@ import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.level.storage.ValueOutput;
 
 import java.util.Optional;
+import java.util.function.Predicate;
 
 /**
  * Lightweight autonomous colony citizen built on PathfinderMob without the heavy vanilla Brain system.
- * Features a 9-slot CitizenInventory, JobType, active ColonyTask, road speed boost (+30%),
+ * Features a 9-slot CitizenInventory, JobType, canonical ColonyTask reference, road speed boost (+30%),
  * and a single CitizenJobFSMGoal state machine.
  */
 public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMob {
@@ -62,6 +64,7 @@ public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMo
 
     private final CitizenInventory inventory = new CitizenInventory();
     private ColonyTask currentTask;
+    private boolean taskCanonicalized = true;
     private BlockPos outpostPos;
     private BlockPos commandedTargetPos;
 
@@ -109,9 +112,36 @@ public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMo
     }
 
     @Override
+    public void onAddedToLevel() {
+        super.onAddedToLevel();
+        if (this.level() instanceof ServerLevel serverLevel) {
+            CityZoneManager manager = CityZoneManager.get(serverLevel);
+            manager.registerCitizen(this);
+            if (this.currentTask != null && !this.taskCanonicalized) {
+                this.currentTask = manager.resolveCanonicalTask(this.currentTask);
+                this.taskCanonicalized = true;
+            }
+        }
+    }
+
+    @Override
+    public void onRemovedFromLevel() {
+        if (this.level() instanceof ServerLevel serverLevel) {
+            CityZoneManager.get(serverLevel).unregisterCitizen(this);
+        }
+        super.onRemovedFromLevel();
+    }
+
+    @Override
     public void tick() {
         super.tick();
-        if (!this.level().isClientSide()) {
+        if (this.level() instanceof ServerLevel serverLevel) {
+            CityZoneManager manager = CityZoneManager.get(serverLevel);
+            manager.registerCitizen(this);
+            if (this.currentTask != null && !this.taskCanonicalized) {
+                this.currentTask = manager.resolveCanonicalTask(this.currentTask);
+                this.taskCanonicalized = true;
+            }
             updateRoadMovementSpeedModifier();
         }
     }
@@ -152,10 +182,15 @@ public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMo
             manager.releaseCitizenTasks(this.getUUID());
             this.currentTask = null;
             if (resolved == JobType.GUARD && this.outpostPos == null) {
-                Optional<ZoneData> defenseZone = manager.getZonesByType(com.citiescolony.api.ZoneType.DEFENSE)
-                        .stream()
-                        .findFirst();
-                this.outpostPos = defenseZone.map(ZoneData::center).orElseGet(this::blockPosition);
+                Optional<BlockPos> outpostBlock = manager.findNearestGuardOutpost(this.blockPosition());
+                if (outpostBlock.isPresent()) {
+                    this.outpostPos = outpostBlock.get();
+                } else {
+                    Optional<ZoneData> defenseZone = manager.getZonesByType(com.citiescolony.api.ZoneType.DEFENSE)
+                            .stream()
+                            .findFirst();
+                    this.outpostPos = defenseZone.map(ZoneData::center).orElseGet(this::blockPosition);
+                }
             }
         }
     }
@@ -176,11 +211,21 @@ public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMo
     }
 
     public Optional<ColonyTask> getCurrentTask() {
+        if (this.currentTask != null && !this.taskCanonicalized && this.level() instanceof ServerLevel serverLevel) {
+            this.currentTask = CityZoneManager.get(serverLevel).resolveCanonicalTask(this.currentTask);
+            this.taskCanonicalized = true;
+        }
         return Optional.ofNullable(this.currentTask);
     }
 
     public void setCurrentTask(ColonyTask task) {
-        this.currentTask = task;
+        if (task != null && this.level() instanceof ServerLevel serverLevel) {
+            this.currentTask = CityZoneManager.get(serverLevel).resolveCanonicalTask(task);
+            this.taskCanonicalized = true;
+        } else {
+            this.currentTask = task;
+            this.taskCanonicalized = true;
+        }
     }
 
     public Optional<BlockPos> getOutpostPos() {
@@ -227,7 +272,8 @@ public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMo
             ColonyTask forcedTask = forcedTaskOpt.get();
             forcedTask.assignTo(this.getUUID());
             manager.enqueueTask(forcedTask);
-            this.currentTask = forcedTask;
+            this.currentTask = manager.resolveCanonicalTask(forcedTask);
+            this.taskCanonicalized = true;
             this.commandedTargetPos = null;
         } else {
             setCommandedTargetPos(targetPos);
@@ -254,7 +300,7 @@ public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMo
             if (getJobType().canExecute(ColonyTask.TaskType.HARVEST)) {
                 return Optional.of(new ColonyTask(ColonyTask.TaskType.HARVEST, targetPos, 200));
             }
-        } else if (com.citiescolony.common.city.StorageLogisticsHelper.getStorageContainerAt(level, targetPos).isPresent()
+        } else if (StorageLogisticsHelper.getStorageContainerAt(level, targetPos).isPresent()
                 && this.inventory.hasDeliverableItems()) {
             return Optional.of(new ColonyTask(ColonyTask.TaskType.DELIVER, targetPos, 200));
         } else if (getJobType() == JobType.MINER
@@ -268,7 +314,7 @@ public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMo
     public void performRangedAttack(LivingEntity target, float distanceFactor) {
         ItemStack weapon = this.getMainHandItem();
         if (!weapon.is(Items.BOW) && !weapon.is(Items.CROSSBOW)) {
-            weapon = new ItemStack(Items.BOW);
+            return;
         }
         ItemStack arrowPrototype = new ItemStack(Items.ARROW);
         AbstractArrow arrow = ProjectileUtil.getMobArrow(this, arrowPrototype, distanceFactor, weapon);
@@ -281,19 +327,53 @@ public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMo
         this.level().addFreshEntity(arrow);
     }
 
+    /**
+     * Equips a combat weapon from the citizen's inventory by swapping slots (without duplicating items via .copy()
+     * and without spawning free Iron Swords out of thin air).
+     */
     public void equipBestCombatWeapon() {
-        ItemStack ranged = this.inventory.findRangedWeapon();
-        ItemStack melee = this.inventory.findMeleeWeapon();
         LivingEntity target = this.getTarget();
-        if (target != null && this.distanceToSqr(target) > 25.0D && !ranged.isEmpty()) {
-            this.setItemSlot(EquipmentSlot.MAINHAND, ranged.copy());
-        } else if (!melee.isEmpty()) {
-            this.setItemSlot(EquipmentSlot.MAINHAND, melee.copy());
-        } else if (!ranged.isEmpty()) {
-            this.setItemSlot(EquipmentSlot.MAINHAND, ranged.copy());
-        } else if (this.getMainHandItem().isEmpty()) {
-            this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.IRON_SWORD));
+        boolean preferRanged = target != null && this.distanceToSqr(target) > 25.0D;
+        ItemStack currentMainHand = this.getMainHandItem();
+
+        Predicate<ItemStack> rangedCheck = s -> s.is(Items.BOW) || s.is(Items.CROSSBOW);
+        Predicate<ItemStack> meleeCheck = s -> StorageLogisticsHelper.isCombatWeapon(s) && !rangedCheck.test(s);
+
+        if (preferRanged) {
+            if (rangedCheck.test(currentMainHand)) {
+                return;
+            }
+            if (swapInventorySlotToMainHand(rangedCheck)) {
+                return;
+            }
         }
+
+        if (meleeCheck.test(currentMainHand)) {
+            return;
+        }
+        if (swapInventorySlotToMainHand(meleeCheck)) {
+            return;
+        }
+        if (!rangedCheck.test(currentMainHand)) {
+            swapInventorySlotToMainHand(rangedCheck);
+        }
+    }
+
+    private boolean swapInventorySlotToMainHand(Predicate<ItemStack> weaponPredicate) {
+        int slot = this.inventory.findSlotMatching(weaponPredicate);
+        if (slot < 0) {
+            return false;
+        }
+        ItemStack chosenWeapon = this.inventory.removeItemNoUpdate(slot);
+        ItemStack previousHand = this.getMainHandItem();
+        if (!previousHand.isEmpty()) {
+            ItemStack leftover = this.inventory.insertStack(previousHand);
+            if (!leftover.isEmpty()) {
+                this.inventory.setItem(slot, leftover);
+            }
+        }
+        this.setItemSlot(EquipmentSlot.MAINHAND, chosenWeapon);
+        return true;
     }
 
     @Override
@@ -305,7 +385,13 @@ public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMo
                 Containers.dropItemStack(level, this.getX(), this.getY(), this.getZ(), stack);
             }
         }
+        ItemStack mainHand = this.getMainHandItem();
+        if (!mainHand.isEmpty()) {
+            Containers.dropItemStack(level, this.getX(), this.getY(), this.getZ(), mainHand);
+            this.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+        }
         CityZoneManager manager = CityZoneManager.get(level);
+        manager.unregisterCitizen(this);
         manager.releaseCitizenTasks(this.getUUID());
         manager.unassignCitizen(this.getUUID());
     }
@@ -333,6 +419,7 @@ public class ColonyCitizenEntity extends PathfinderMob implements RangedAttackMo
         this.entityData.set(DATA_JOB_ID, loadedJob.id());
         this.inventory.loadFromValueInput(input);
         this.currentTask = input.read("current_task", ColonyTask.CODEC).orElse(null);
+        this.taskCanonicalized = false;
         this.outpostPos = input.read("outpost_pos", BlockPos.CODEC).orElse(null);
         this.commandedTargetPos = input.read("commanded_target_pos", BlockPos.CODEC).orElse(null);
     }

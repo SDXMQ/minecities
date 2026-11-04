@@ -56,7 +56,9 @@ import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.client.event.CustomizeGuiOverlayEvent;
+import net.minecraftforge.client.event.MovementInputUpdateEvent;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
+import net.minecraftforge.client.event.ViewportEvent;
 import net.minecraftforge.client.event.sound.PlaySoundEvent;
 import net.minecraftforge.common.util.Lazy;
 import net.minecraftforge.event.TickEvent;
@@ -94,6 +96,37 @@ public class ClientEventHandler
     public static void renderWorldLastEvent(@NotNull final RenderLevelStageEvent event)
     {
         WorldEventContext.INSTANCE.renderWorldLastEvent(event);
+        com.minecolonies.core.client.rts.RtsGridRenderer.onRenderLevelStage(event);
+    }
+
+    @SubscribeEvent
+    public static void onRtsClientTick(@NotNull final TickEvent.ClientTickEvent event)
+    {
+        com.minecolonies.core.client.rts.RtsCameraController.onClientTick(event);
+    }
+
+    @SubscribeEvent
+    public static void onRtsCameraAngles(@NotNull final ViewportEvent.ComputeCameraAngles event)
+    {
+        com.minecolonies.core.client.rts.RtsCameraController.onComputeCameraAngles(event);
+    }
+
+    @SubscribeEvent
+    public static void onRtsMouseScroll(@NotNull final net.minecraftforge.client.event.InputEvent.MouseScrollingEvent event)
+    {
+        com.minecolonies.core.client.rts.RtsCameraController.onMouseScroll(event);
+    }
+
+    @SubscribeEvent
+    public static void onRtsMouseButtonPre(@NotNull final net.minecraftforge.client.event.InputEvent.MouseButton.Pre event)
+    {
+        com.minecolonies.core.client.rts.RtsCameraController.onMouseButtonPre(event);
+    }
+
+    @SubscribeEvent
+    public static void onRtsMovementInputUpdate(@NotNull final MovementInputUpdateEvent event)
+    {
+        com.minecolonies.core.client.rts.RtsCameraController.onMovementInputUpdate(event);
     }
 
     @SubscribeEvent(priority = EventPriority.LOWEST)

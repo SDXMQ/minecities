@@ -1,8 +1,10 @@
 package com.citiescolony;
 
 import com.citiescolony.api.ColonyIds;
+import com.citiescolony.api.ColonyTask;
 import com.citiescolony.common.city.CityZoneManager;
 import com.citiescolony.common.city.NightWaveDefenseManager;
+import com.citiescolony.common.city.StorageLogisticsHelper;
 import com.citiescolony.common.city.ZoneTaskGenerator;
 import com.citiescolony.common.entity.ColonyCitizenEntity;
 import com.citiescolony.common.network.ColonyNetworkHandler;
@@ -10,30 +12,39 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionResult;
-import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.MobCategory;
+import net.minecraft.world.entity.monster.Enemy;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.state.BlockBehaviour;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.MapColor;
+import net.minecraft.world.phys.AABB;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.level.BlockEvent;
+import net.neoforged.neoforge.event.level.block.CropGrowEvent;
 import net.neoforged.neoforge.event.tick.LevelTickEvent;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.registries.DeferredBlock;
 import net.neoforged.neoforge.registries.DeferredHolder;
 import net.neoforged.neoforge.registries.DeferredItem;
 import net.neoforged.neoforge.registries.DeferredRegister;
+
+import java.util.List;
 
 /**
  * Main entry point for Minecraft Cities Colony (Minecraft 26.2 / NeoForge).
@@ -51,14 +62,46 @@ public class CitiesColonyMod {
     public static final DeferredRegister<EntityType<?>> ENTITY_TYPES =
             DeferredRegister.create(net.minecraft.core.registries.Registries.ENTITY_TYPE, MOD_ID);
 
-    // Blocks registered with explicit Minecraft 26.2 BlockIds ResourceKey
+    // Town Hall Block: registers its position as townHallPos in CityZoneManager on placement and clears on removal
     public static final DeferredBlock<Block> TOWN_HALL_BLOCK = BLOCKS.register(
             ColonyIds.BlockIds.TOWN_HALL.identifier().getPath(),
             () -> new Block(BlockBehaviour.Properties.of()
                     .setId(ColonyIds.BlockIds.TOWN_HALL)
                     .mapColor(MapColor.GOLD)
                     .strength(4.0F, 12.0F)
-                    .sound(SoundType.STONE))
+                    .sound(SoundType.STONE)) {
+                @Override
+                public void onPlace(BlockState state, Level level, BlockPos pos, BlockState oldState, boolean movedByPiston) {
+                    super.onPlace(state, level, pos, oldState, movedByPiston);
+                    if (level instanceof ServerLevel serverLevel && !state.is(oldState.getBlock())) {
+                        CityZoneManager manager = CityZoneManager.get(serverLevel);
+                        manager.setTownHallPos(pos);
+                        ColonyNetworkHandler.broadcastCitySync(serverLevel, manager);
+                    }
+                }
+
+                @Override
+                public void setPlacedBy(Level level, BlockPos pos, BlockState state, LivingEntity placer, ItemStack stack) {
+                    super.setPlacedBy(level, pos, state, placer, stack);
+                    if (level instanceof ServerLevel serverLevel) {
+                        CityZoneManager manager = CityZoneManager.get(serverLevel);
+                        manager.setTownHallPos(pos);
+                        ColonyNetworkHandler.broadcastCitySync(serverLevel, manager);
+                    }
+                }
+
+                @Override
+                public BlockState playerWillDestroy(Level level, BlockPos pos, BlockState state, Player player) {
+                    if (level instanceof ServerLevel serverLevel) {
+                        CityZoneManager manager = CityZoneManager.get(serverLevel);
+                        if (manager.getTownHallPos().filter(pos::equals).isPresent()) {
+                            manager.setTownHallPos(null);
+                            ColonyNetworkHandler.broadcastCitySync(serverLevel, manager);
+                        }
+                    }
+                    return super.playerWillDestroy(level, pos, state, player);
+                }
+            }
     );
 
     public static final DeferredBlock<Block> PAVED_ROAD_BLOCK = BLOCKS.register(
@@ -70,13 +113,46 @@ public class CitiesColonyMod {
                     .sound(SoundType.STONE))
     );
 
+    // Guard Outpost Block: registers/unregisters defense outpost anchor in CityZoneManager on placement/removal
     public static final DeferredBlock<Block> GUARD_OUTPOST_BLOCK = BLOCKS.register(
             ColonyIds.BlockIds.GUARD_OUTPOST.identifier().getPath(),
             () -> new Block(BlockBehaviour.Properties.of()
                     .setId(ColonyIds.BlockIds.GUARD_OUTPOST)
                     .mapColor(MapColor.COLOR_RED)
                     .strength(3.0F, 9.0F)
-                    .sound(SoundType.WOOD))
+                    .sound(SoundType.WOOD)) {
+                @Override
+                public void onPlace(BlockState state, Level level, BlockPos pos, BlockState oldState, boolean movedByPiston) {
+                    super.onPlace(state, level, pos, oldState, movedByPiston);
+                    if (level instanceof ServerLevel serverLevel && !state.is(oldState.getBlock())) {
+                        CityZoneManager manager = CityZoneManager.get(serverLevel);
+                        manager.registerGuardOutpost(pos);
+                        manager.enqueueTask(new ColonyTask(
+                                ColonyTask.TaskType.GUARD,
+                                pos.immutable(),
+                                ColonyTask.TaskType.GUARD.defaultPriority()
+                        ));
+                    }
+                }
+
+                @Override
+                public void setPlacedBy(Level level, BlockPos pos, BlockState state, LivingEntity placer, ItemStack stack) {
+                    super.setPlacedBy(level, pos, state, placer, stack);
+                    if (level instanceof ServerLevel serverLevel) {
+                        CityZoneManager manager = CityZoneManager.get(serverLevel);
+                        manager.registerGuardOutpost(pos);
+                    }
+                }
+
+                @Override
+                public BlockState playerWillDestroy(Level level, BlockPos pos, BlockState state, Player player) {
+                    if (level instanceof ServerLevel serverLevel) {
+                        CityZoneManager manager = CityZoneManager.get(serverLevel);
+                        manager.unregisterGuardOutpost(pos);
+                    }
+                    return super.playerWillDestroy(level, pos, state, player);
+                }
+            }
     );
 
     // BlockItems registered with explicit Minecraft 26.2 BlockItemIds paired ResourceKey
@@ -113,20 +189,18 @@ public class CitiesColonyMod {
                     if (context.getLevel() instanceof ServerLevel serverLevel) {
                         BlockPos rallyTarget = context.getClickedPos().above();
                         CityZoneManager manager = CityZoneManager.get(serverLevel);
-                        net.minecraft.world.phys.AABB bossSearchBox = new net.minecraft.world.phys.AABB(rallyTarget).inflate(48.0D, 24.0D, 48.0D);
-                        java.util.List<net.minecraft.world.entity.LivingEntity> expeditionTargets = serverLevel.getEntitiesOfClass(
-                                net.minecraft.world.entity.LivingEntity.class,
+                        AABB bossSearchBox = new AABB(rallyTarget).inflate(48.0D, 24.0D, 48.0D);
+                        List<LivingEntity> expeditionTargets = serverLevel.getEntitiesOfClass(
+                                LivingEntity.class,
                                 bossSearchBox,
-                                e -> e.isAlive() && e instanceof net.minecraft.world.entity.monster.Enemy
+                                e -> e.isAlive() && e instanceof Enemy
                         );
 
-                        for (Entity entity : serverLevel.getAllEntities()) {
-                            if (entity instanceof ColonyCitizenEntity citizen
-                                    && citizen.isAlive()
-                                    && citizen.getJobType() == com.citiescolony.api.JobType.GUARD) {
-                                if (citizen.getCitizenInventory().findCombatWeapon().isEmpty()) {
-                                    net.minecraft.world.item.ItemStack supplied =
-                                            com.citiescolony.common.city.StorageLogisticsHelper.withdrawWeaponForGuard(serverLevel, manager);
+                        for (ColonyCitizenEntity citizen : manager.getActiveCitizens()) {
+                            if (citizen.getJobType() == com.citiescolony.api.JobType.GUARD) {
+                                if (citizen.getCitizenInventory().findCombatWeapon().isEmpty()
+                                        && !StorageLogisticsHelper.isCombatWeapon(citizen.getMainHandItem())) {
+                                    ItemStack supplied = StorageLogisticsHelper.withdrawWeaponForGuard(serverLevel, manager);
                                     if (!supplied.isEmpty()) {
                                         citizen.getCitizenInventory().insertStack(supplied);
                                     }
@@ -159,6 +233,7 @@ public class CitiesColonyMod {
                             serverLevel.addFreshEntity(citizen);
                             context.getItemInHand().shrink(1);
                             CityZoneManager manager = CityZoneManager.get(serverLevel);
+                            manager.registerCitizen(citizen);
                             ColonyNetworkHandler.broadcastResourceHudSync(serverLevel, manager);
                         }
                     }
@@ -204,30 +279,49 @@ public class CitiesColonyMod {
     }
 
     @SubscribeEvent
+    public static void onBlockPlaced(BlockEvent.EntityPlaceEvent event) {
+        if (event.getLevel() instanceof ServerLevel serverLevel) {
+            ZoneTaskGenerator.onBlockStateChanged(serverLevel, event.getPos(), event.getPlacedBlock());
+        }
+    }
+
+    @SubscribeEvent
+    public static void onBlockBroken(BlockEvent.BreakEvent event) {
+        if (event.getLevel() instanceof ServerLevel serverLevel) {
+            ZoneTaskGenerator.onBlockStateChanged(serverLevel, event.getPos(), net.minecraft.world.level.block.Blocks.AIR.defaultBlockState());
+        }
+    }
+
+    @SubscribeEvent
+    public static void onCropGrowPost(CropGrowEvent.Post event) {
+        if (event.getLevel() instanceof ServerLevel serverLevel) {
+            ZoneTaskGenerator.onBlockStateChanged(serverLevel, event.getPos(), event.getState());
+        }
+    }
+
+    @SubscribeEvent
     public static void onServerLevelTickPost(LevelTickEvent.Post event) {
         if (!(event.getLevel() instanceof ServerLevel serverLevel)) {
+            return;
+        }
+        // Guard against Nether/End ticks interfering with Overworld city zones and HUD sync
+        if (serverLevel != serverLevel.getServer().overworld()) {
             return;
         }
         ZoneTaskGenerator.tick(serverLevel);
 
         if ((serverLevel.getGameTime() % 20L) == 0L) {
+            CityZoneManager manager = CityZoneManager.get(serverLevel);
             int citizenCount = countAliveCitizens(serverLevel);
             NightWaveDefenseManager.tick(serverLevel, citizenCount);
 
             if (!serverLevel.players().isEmpty()) {
-                CityZoneManager manager = CityZoneManager.get(serverLevel);
                 ColonyNetworkHandler.broadcastResourceHudSync(serverLevel, manager);
             }
         }
     }
 
     private static int countAliveCitizens(ServerLevel level) {
-        int count = 0;
-        for (Entity entity : level.getAllEntities()) {
-            if (entity instanceof ColonyCitizenEntity citizen && citizen.isAlive()) {
-                count++;
-            }
-        }
-        return count;
+        return CityZoneManager.get(level).countAliveCitizens();
     }
 }

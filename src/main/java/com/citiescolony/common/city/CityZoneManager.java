@@ -6,9 +6,11 @@ import com.citiescolony.api.JobType;
 import com.citiescolony.api.TaskState;
 import com.citiescolony.api.ZoneData;
 import com.citiescolony.api.ZoneType;
+import com.citiescolony.common.entity.ColonyCitizenEntity;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.UUIDUtil;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.saveddata.SavedData;
@@ -18,23 +20,31 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
 
 /**
- * Persistent world data manager for city zones, town hall center coordinates,
- * and the active ColonyTask queue, built on Minecraft 26.2 SavedDataType + Codec.
+ * Persistent world data manager for city zones, town hall & outpost coordinates,
+ * wave defense state, active citizen set, and the O(1) spatially-indexed ColonyTask queue.
  */
 public class CityZoneManager extends SavedData {
 
     public static final Codec<CityZoneManager> CODEC = RecordCodecBuilder.create(instance -> instance.group(
             ZoneData.CODEC.listOf().optionalFieldOf("zones", List.of()).forGetter(CityZoneManager::getZoneList),
             BlockPos.CODEC.optionalFieldOf("town_hall_pos").forGetter(CityZoneManager::getTownHallPos),
-            ColonyTask.CODEC.listOf().optionalFieldOf("tasks", List.of()).forGetter(CityZoneManager::getTaskList)
+            ColonyTask.CODEC.listOf().optionalFieldOf("tasks", List.of()).forGetter(CityZoneManager::getTaskList),
+            BlockPos.CODEC.listOf().optionalFieldOf("outposts", List.of()).forGetter(CityZoneManager::getOutpostList),
+            Codec.LONG.optionalFieldOf("last_spawned_wave_day", -1L).forGetter(CityZoneManager::getLastSpawnedWaveDay),
+            UUIDUtil.CODEC.listOf().optionalFieldOf("active_wave_mobs", List.of()).forGetter(CityZoneManager::getActiveWaveMobIds)
     ).apply(instance, CityZoneManager::new));
 
     public static final SavedDataType<CityZoneManager> TYPE = new SavedDataType<>(
@@ -46,11 +56,33 @@ public class CityZoneManager extends SavedData {
 
     private final Map<UUID, ZoneData> zones = new LinkedHashMap<>();
     private final Map<UUID, ColonyTask> taskQueue = new LinkedHashMap<>();
+    /**
+     * Spatial index mapping target BlockPos -> taskId for O(1) active task lookup.
+     */
+    private final Map<BlockPos, UUID> activeTaskByPos = new HashMap<>();
+    /**
+     * Zones awaiting their initial full scan; subsequent ticks use event-driven updates and bounded sampling.
+     */
+    private final Set<UUID> pendingInitialScanZones = new LinkedHashSet<>();
+    private final Map<UUID, Integer> zoneSamplingCursors = new HashMap<>();
+
+    private final Set<BlockPos> guardOutposts = new LinkedHashSet<>();
     private BlockPos townHallPos;
     private long zoneRevision = 0L;
 
+    /**
+     * World-scoped night wave state (replaces static fields to prevent cross-world pollution in singleplayer).
+     */
+    private long lastSpawnedWaveDay = -1L;
+    private final List<UUID> activeWaveMobIds = new ArrayList<>();
+
+    /**
+     * Dedicated live citizen set so server ticks never call level.getAllEntities().
+     */
+    private final Set<ColonyCitizenEntity> activeCitizens = Collections.newSetFromMap(new WeakHashMap<>());
+
     public CityZoneManager() {
-        this(List.of(), Optional.empty(), List.of());
+        this(List.of(), Optional.empty(), List.of(), List.of(), -1L, List.of());
     }
 
     public CityZoneManager(
@@ -58,10 +90,22 @@ public class CityZoneManager extends SavedData {
             Optional<BlockPos> townHallPos,
             List<ColonyTask> initialTasks
     ) {
+        this(initialZones, townHallPos, initialTasks, List.of(), -1L, List.of());
+    }
+
+    public CityZoneManager(
+            List<ZoneData> initialZones,
+            Optional<BlockPos> townHallPos,
+            List<ColonyTask> initialTasks,
+            List<BlockPos> initialOutposts,
+            long lastSpawnedWaveDay,
+            List<UUID> initialWaveMobs
+    ) {
         if (initialZones != null) {
             for (ZoneData zone : initialZones) {
                 if (zone != null) {
                     this.zones.put(zone.id(), zone);
+                    this.pendingInitialScanZones.add(zone.id());
                 }
             }
         }
@@ -70,8 +114,20 @@ public class CityZoneManager extends SavedData {
             for (ColonyTask task : initialTasks) {
                 if (task != null && !task.state().isTerminal()) {
                     this.taskQueue.put(task.taskId(), task);
+                    this.activeTaskByPos.put(task.targetPos(), task.taskId());
                 }
             }
+        }
+        if (initialOutposts != null) {
+            for (BlockPos pos : initialOutposts) {
+                if (pos != null) {
+                    this.guardOutposts.add(pos.immutable());
+                }
+            }
+        }
+        this.lastSpawnedWaveDay = lastSpawnedWaveDay;
+        if (initialWaveMobs != null) {
+            this.activeWaveMobIds.addAll(initialWaveMobs);
         }
     }
 
@@ -79,6 +135,36 @@ public class CityZoneManager extends SavedData {
         Objects.requireNonNull(level, "ServerLevel must not be null");
         ServerLevel overworld = level.getServer().overworld();
         return overworld.getDataStorage().computeIfAbsent(TYPE);
+    }
+
+    public synchronized void registerCitizen(ColonyCitizenEntity citizen) {
+        if (citizen != null && citizen.isAlive()) {
+            this.activeCitizens.add(citizen);
+        }
+    }
+
+    public synchronized void unregisterCitizen(ColonyCitizenEntity citizen) {
+        if (citizen != null) {
+            this.activeCitizens.remove(citizen);
+        }
+    }
+
+    public synchronized List<ColonyCitizenEntity> getActiveCitizens() {
+        List<ColonyCitizenEntity> result = new ArrayList<>(this.activeCitizens.size());
+        Iterator<ColonyCitizenEntity> it = this.activeCitizens.iterator();
+        while (it.hasNext()) {
+            ColonyCitizenEntity citizen = it.next();
+            if (citizen == null || !citizen.isAlive() || citizen.isRemoved()) {
+                it.remove();
+            } else {
+                result.add(citizen);
+            }
+        }
+        return result;
+    }
+
+    public synchronized int countAliveCitizens() {
+        return getActiveCitizens().size();
     }
 
     public synchronized List<ZoneData> getZoneList() {
@@ -120,7 +206,8 @@ public class CityZoneManager extends SavedData {
     public synchronized ZoneData createZone(ZoneType type, BlockPos firstCorner, BlockPos secondCorner) {
         ZoneData created = ZoneData.fromCorners(type, firstCorner, secondCorner);
         this.zones.put(created.id(), created);
-        if (this.townHallPos == null) {
+        this.pendingInitialScanZones.add(created.id());
+        if (this.townHallPos == null && (type == ZoneType.RESIDENTIAL || type == ZoneType.STORAGE)) {
             this.townHallPos = created.center().immutable();
         }
         this.zoneRevision++;
@@ -131,11 +218,32 @@ public class CityZoneManager extends SavedData {
     public synchronized void putZone(ZoneData zone) {
         Objects.requireNonNull(zone, "zone must not be null");
         this.zones.put(zone.id(), zone);
-        if (this.townHallPos == null) {
+        this.pendingInitialScanZones.add(zone.id());
+        if (this.townHallPos == null && (zone.type() == ZoneType.RESIDENTIAL || zone.type() == ZoneType.STORAGE)) {
             this.townHallPos = zone.center().immutable();
         }
         this.zoneRevision++;
         this.setDirty();
+    }
+
+    public synchronized boolean consumeInitialScanFlag(UUID zoneId) {
+        return zoneId != null && this.pendingInitialScanZones.remove(zoneId);
+    }
+
+    public synchronized void markZoneDirtyForScan(UUID zoneId) {
+        if (zoneId != null && this.zones.containsKey(zoneId)) {
+            this.pendingInitialScanZones.add(zoneId);
+        }
+    }
+
+    public synchronized int getAndAdvanceSamplingCursor(UUID zoneId, int step, int maxVolume) {
+        if (maxVolume <= 0) {
+            return 0;
+        }
+        int current = this.zoneSamplingCursors.getOrDefault(zoneId, 0);
+        int next = (current + Math.max(1, step)) % maxVolume;
+        this.zoneSamplingCursors.put(zoneId, next);
+        return current;
     }
 
     public synchronized boolean removeZone(UUID zoneId) {
@@ -144,7 +252,16 @@ public class CityZoneManager extends SavedData {
         }
         ZoneData removed = this.zones.remove(zoneId);
         if (removed != null) {
-            this.taskQueue.values().removeIf(task -> removed.contains(task.targetPos()));
+            this.pendingInitialScanZones.remove(zoneId);
+            this.zoneSamplingCursors.remove(zoneId);
+            Iterator<Map.Entry<UUID, ColonyTask>> it = this.taskQueue.entrySet().iterator();
+            while (it.hasNext()) {
+                ColonyTask task = it.next().getValue();
+                if (removed.contains(task.targetPos())) {
+                    this.activeTaskByPos.remove(task.targetPos(), task.taskId());
+                    it.remove();
+                }
+            }
             this.zoneRevision++;
             this.setDirty();
             return true;
@@ -176,6 +293,59 @@ public class CityZoneManager extends SavedData {
     public synchronized void setTownHallPos(BlockPos pos) {
         this.townHallPos = pos == null ? null : pos.immutable();
         this.setDirty();
+    }
+
+    public synchronized void registerGuardOutpost(BlockPos pos) {
+        if (pos != null) {
+            BlockPos immutable = pos.immutable();
+            this.guardOutposts.add(immutable);
+            this.setDirty();
+        }
+    }
+
+    public synchronized void unregisterGuardOutpost(BlockPos pos) {
+        if (pos != null && this.guardOutposts.remove(pos)) {
+            this.setDirty();
+        }
+    }
+
+    public synchronized List<BlockPos> getOutpostList() {
+        return List.copyOf(this.guardOutposts);
+    }
+
+    public synchronized Optional<BlockPos> findNearestGuardOutpost(BlockPos origin) {
+        if (this.guardOutposts.isEmpty()) {
+            return Optional.empty();
+        }
+        if (origin == null) {
+            return Optional.of(this.guardOutposts.iterator().next());
+        }
+        return this.guardOutposts.stream()
+                .min(Comparator.comparingDouble(p -> p.distSqr(origin)));
+    }
+
+    public synchronized long getLastSpawnedWaveDay() {
+        return this.lastSpawnedWaveDay;
+    }
+
+    public synchronized void setLastSpawnedWaveDay(long day) {
+        this.lastSpawnedWaveDay = day;
+        this.setDirty();
+    }
+
+    public synchronized List<UUID> getActiveWaveMobIds() {
+        return List.copyOf(this.activeWaveMobIds);
+    }
+
+    public synchronized List<UUID> getMutableActiveWaveMobIds() {
+        return this.activeWaveMobIds;
+    }
+
+    public synchronized void addActiveWaveMob(UUID mobId) {
+        if (mobId != null && !this.activeWaveMobIds.contains(mobId)) {
+            this.activeWaveMobIds.add(mobId);
+            this.setDirty();
+        }
     }
 
     public synchronized boolean assignCitizenToZone(UUID zoneId, UUID citizenId) {
@@ -222,26 +392,73 @@ public class CityZoneManager extends SavedData {
                 .toList();
     }
 
+    public synchronized Optional<ColonyTask> getTaskById(UUID taskId) {
+        if (taskId == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(this.taskQueue.get(taskId));
+    }
+
+    /**
+     * Rebinds a deserialized citizen task to the canonical instance stored inside taskQueue
+     * so state transitions on the citizen's task are reflected in CityZoneManager.
+     */
+    public synchronized ColonyTask resolveCanonicalTask(ColonyTask task) {
+        if (task == null) {
+            return null;
+        }
+        ColonyTask existingById = this.taskQueue.get(task.taskId());
+        if (existingById != null) {
+            return existingById;
+        }
+        UUID existingAtPosId = this.activeTaskByPos.get(task.targetPos());
+        if (existingAtPosId != null) {
+            ColonyTask existingAtPos = this.taskQueue.get(existingAtPosId);
+            if (existingAtPos != null && !existingAtPos.state().isTerminal()) {
+                return existingAtPos;
+            }
+        }
+        if (!task.state().isTerminal()) {
+            this.taskQueue.put(task.taskId(), task);
+            this.activeTaskByPos.put(task.targetPos(), task.taskId());
+            this.setDirty();
+        }
+        return task;
+    }
+
+    /**
+     * O(1) spatial index lookup checking whether an active task already exists at targetPos.
+     */
+    public synchronized boolean hasActiveTaskAt(BlockPos targetPos) {
+        return hasActiveTaskAt(targetPos, null);
+    }
+
+    /**
+     * O(1) spatial index lookup checking whether an active task (optionally of a specific type) exists at targetPos.
+     */
     public synchronized boolean hasActiveTaskAt(BlockPos targetPos, ColonyTask.TaskType type) {
         if (targetPos == null) {
             return false;
         }
-        for (ColonyTask task : this.taskQueue.values()) {
-            if (!task.state().isTerminal()
-                    && task.targetPos().equals(targetPos)
-                    && (type == null || task.type() == type)) {
-                return true;
-            }
+        UUID taskId = this.activeTaskByPos.get(targetPos);
+        if (taskId == null) {
+            return false;
         }
-        return false;
+        ColonyTask task = this.taskQueue.get(taskId);
+        if (task == null || task.state().isTerminal()) {
+            this.activeTaskByPos.remove(targetPos);
+            return false;
+        }
+        return type == null || task.type() == type;
     }
 
     public synchronized boolean enqueueTask(ColonyTask task) {
         Objects.requireNonNull(task, "task must not be null");
-        if (hasActiveTaskAt(task.targetPos(), task.type())) {
+        if (hasActiveTaskAt(task.targetPos(), null)) {
             return false;
         }
         this.taskQueue.put(task.taskId(), task);
+        this.activeTaskByPos.put(task.targetPos(), task.taskId());
         this.setDirty();
         return true;
     }
@@ -299,6 +516,7 @@ public class CityZoneManager extends SavedData {
         }
         ColonyTask removed = this.taskQueue.remove(taskId);
         if (removed != null) {
+            this.activeTaskByPos.remove(removed.targetPos(), taskId);
             removed.markCompleted();
             this.setDirty();
         }
@@ -310,6 +528,7 @@ public class CityZoneManager extends SavedData {
         }
         ColonyTask removed = this.taskQueue.remove(taskId);
         if (removed != null) {
+            this.activeTaskByPos.remove(removed.targetPos(), taskId);
             removed.markCancelled();
             this.setDirty();
         }
@@ -332,7 +551,17 @@ public class CityZoneManager extends SavedData {
     }
 
     public synchronized void pruneCompletedTasks() {
-        if (this.taskQueue.values().removeIf(task -> task.state().isTerminal())) {
+        boolean removedAny = false;
+        Iterator<Map.Entry<UUID, ColonyTask>> it = this.taskQueue.entrySet().iterator();
+        while (it.hasNext()) {
+            ColonyTask task = it.next().getValue();
+            if (task.state().isTerminal()) {
+                this.activeTaskByPos.remove(task.targetPos(), task.taskId());
+                it.remove();
+                removedAny = true;
+            }
+        }
+        if (removedAny) {
             this.setDirty();
         }
     }

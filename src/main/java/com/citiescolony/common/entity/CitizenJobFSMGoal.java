@@ -10,6 +10,7 @@ import com.citiescolony.common.city.ZoneTaskGenerator;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
@@ -17,6 +18,7 @@ import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
@@ -26,6 +28,7 @@ import net.minecraft.world.level.block.SweetBerryBushBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
@@ -206,7 +209,8 @@ public class CitizenJobFSMGoal extends Goal {
         this.idleCheckCooldown = 10;
 
         Optional<ColonyTask> nextTaskOpt = this.citizen.getCurrentTask()
-                .filter(t -> !t.state().isTerminal())
+                .map(manager::resolveCanonicalTask)
+                .filter(t -> t != null && !t.state().isTerminal())
                 .or(() -> manager.pollNextTaskFor(job, this.citizen.getUUID(), this.citizen.blockPosition()));
 
         if (nextTaskOpt.isPresent()) {
@@ -220,6 +224,11 @@ public class CitizenJobFSMGoal extends Goal {
 
     private void ensureGuardOutpostAssigned(CityZoneManager manager) {
         if (this.citizen.getOutpostPos().isPresent()) {
+            return;
+        }
+        Optional<BlockPos> outpostBlock = manager.findNearestGuardOutpost(this.citizen.blockPosition());
+        if (outpostBlock.isPresent()) {
+            this.citizen.setOutpostPos(outpostBlock.get());
             return;
         }
         Optional<ZoneData> defenseZone = manager.getZonesByType(ZoneType.DEFENSE).stream().findFirst();
@@ -238,7 +247,8 @@ public class CitizenJobFSMGoal extends Goal {
             return;
         }
 
-        ColonyTask task = taskOpt.get();
+        ColonyTask task = manager.resolveCanonicalTask(taskOpt.get());
+        this.citizen.setCurrentTask(task);
         BlockPos target = task.targetPos();
         if (isWithinWorkReach(task)) {
             this.citizen.getNavigation().stop();
@@ -299,70 +309,233 @@ public class CitizenJobFSMGoal extends Goal {
         }
 
         this.workTicks++;
-        if (this.workTicks < WORK_DURATION_TICKS) {
+        int requiredTicks = task.type() == ColonyTask.TaskType.DELIVER ? 10 : WORK_DURATION_TICKS;
+        if (this.workTicks < requiredTicks) {
             return;
         }
 
-        executeTaskAction(level, manager, task);
-        manager.completeTask(task.taskId());
+        boolean completed = executeTaskAction(level, manager, task);
+        if (completed) {
+            manager.completeTask(task.taskId());
+        } else {
+            // Task could not complete (e.g. out of building materials in storage); release back to PENDING
+            task.resetToPending();
+        }
         this.citizen.setCurrentTask(null);
 
-        if (this.citizen.getCitizenInventory().isReadyForDeposit()) {
+        if (this.citizen.getCitizenInventory().isReadyForDeposit()
+                || (task.type() == ColonyTask.TaskType.DELIVER && this.citizen.getCitizenInventory().hasDeliverableItems())) {
             transitionTo(FsmState.MOVE_TO_STORAGE);
         } else {
             transitionTo(FsmState.IDLE);
         }
     }
 
-    private void executeTaskAction(ServerLevel level, CityZoneManager manager, ColonyTask task) {
+    private boolean executeTaskAction(ServerLevel level, CityZoneManager manager, ColonyTask task) {
         BlockPos pos = task.targetPos();
         if (!level.isLoaded(pos)) {
-            return;
+            return false;
         }
         BlockState state = level.getBlockState(pos);
 
         switch (task.type()) {
             case CHOP -> {
                 if (ZoneTaskGenerator.isLogBlock(state)) {
+                    BlockState saplingStateToPlant = resolveSaplingStateForLog(state);
                     harvestBlockDropsIntoInventory(level, pos, state);
                     level.destroyBlock(pos, false, this.citizen);
                     BlockState below = level.getBlockState(pos.below());
                     if (below.is(BlockTags.DIRT) && level.getBlockState(pos).isAir()) {
-                        level.setBlock(pos, Blocks.OAK_SAPLING.defaultBlockState(), Block.UPDATE_ALL);
+                        if (consumeSaplingForReplant(level, manager, saplingStateToPlant.getBlock().asItem())) {
+                            level.setBlock(pos, saplingStateToPlant, Block.UPDATE_ALL);
+                        }
                     }
                 }
+                return true;
             }
             case MINE -> {
                 if (ZoneTaskGenerator.isMineableTopBlock(level, pos, state)) {
                     harvestBlockDropsIntoInventory(level, pos, state);
                     level.destroyBlock(pos, false, this.citizen);
                 }
+                return true;
             }
             case HARVEST -> {
                 if (ZoneTaskGenerator.isMatureCrop(state)) {
-                    harvestBlockDropsIntoInventory(level, pos, state);
-                    if (state.getBlock() instanceof CropBlock cropBlock) {
-                        level.setBlock(pos, cropBlock.getStateForAge(0), Block.UPDATE_ALL);
-                    } else if (state.getBlock() instanceof SweetBerryBushBlock) {
-                        level.setBlock(pos, state.setValue(SweetBerryBushBlock.AGE, 1), Block.UPDATE_ALL);
-                    } else {
-                        level.destroyBlock(pos, false, this.citizen);
-                    }
+                    harvestCropAndReplant(level, manager, pos, state);
                 }
+                return true;
             }
             case BUILD -> {
                 if (state.isAir() || state.canBeReplaced()) {
                     BlockState buildBlockState = consumeOrFetchBuildingBlock(level, manager);
+                    if (buildBlockState == null) {
+                        return false;
+                    }
                     level.setBlock(pos, buildBlockState, Block.UPDATE_ALL);
                 }
+                return true;
             }
             case DELIVER -> {
-                // Courier delivery transitions directly to storage deposit
+                StorageLogisticsHelper.collectCourierPickupAt(level, pos, this.citizen.getCitizenInventory());
+                return true;
             }
             case GUARD -> {
                 this.citizen.setOutpostPos(pos);
+                return true;
             }
         }
+        return true;
+    }
+
+    /**
+     * Maps each log or wood type to its matching tree sapling block state.
+     */
+    public static BlockState resolveSaplingStateForLog(BlockState logState) {
+        if (logState == null) {
+            return Blocks.OAK_SAPLING.defaultBlockState();
+        }
+        if (logState.is(BlockTags.SPRUCE_LOGS)) {
+            return Blocks.SPRUCE_SAPLING.defaultBlockState();
+        }
+        if (logState.is(BlockTags.BIRCH_LOGS)) {
+            return Blocks.BIRCH_SAPLING.defaultBlockState();
+        }
+        if (logState.is(BlockTags.JUNGLE_LOGS)) {
+            return Blocks.JUNGLE_SAPLING.defaultBlockState();
+        }
+        if (logState.is(BlockTags.ACACIA_LOGS)) {
+            return Blocks.ACACIA_SAPLING.defaultBlockState();
+        }
+        if (logState.is(BlockTags.DARK_OAK_LOGS)) {
+            return Blocks.DARK_OAK_SAPLING.defaultBlockState();
+        }
+        if (logState.is(BlockTags.CHERRY_LOGS)) {
+            return Blocks.CHERRY_SAPLING.defaultBlockState();
+        }
+        if (logState.is(BlockTags.MANGROVE_LOGS)) {
+            return Blocks.MANGROVE_PROPAGULE.defaultBlockState();
+        }
+        return Blocks.OAK_SAPLING.defaultBlockState();
+    }
+
+    /**
+     * Consumes 1 matching sapling item from the citizen's inventory or storage before replanting.
+     */
+    private boolean consumeSaplingForReplant(ServerLevel level, CityZoneManager manager, Item targetSaplingItem) {
+        CitizenInventory inv = this.citizen.getCitizenInventory();
+        int slot = inv.findSlotMatching(s -> s.is(targetSaplingItem));
+        if (slot < 0) {
+            slot = inv.findSlotMatching(s -> s.is(ItemTags.SAPLINGS));
+        }
+        if (slot < 0) {
+            ItemStack fromStorage = StorageLogisticsHelper.extractMatchingItem(
+                    level,
+                    manager,
+                    s -> s.is(targetSaplingItem) || s.is(ItemTags.SAPLINGS),
+                    4
+            );
+            if (!fromStorage.isEmpty()) {
+                inv.insertStack(fromStorage);
+                slot = inv.findSlotMatching(s -> s.is(targetSaplingItem) || s.is(ItemTags.SAPLINGS));
+            }
+        }
+        if (slot >= 0) {
+            ItemStack saplingStack = inv.getItem(slot);
+            saplingStack.shrink(1);
+            if (saplingStack.isEmpty()) {
+                inv.setItem(slot, ItemStack.EMPTY);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Harvests crop drops, deducts 1 matching seed from the harvested drops (or citizen/storage inventory),
+     * and replants at age 0 only when a seed was actually consumed.
+     */
+    private void harvestCropAndReplant(ServerLevel level, CityZoneManager manager, BlockPos pos, BlockState state) {
+        if (state.getBlock() instanceof SweetBerryBushBlock) {
+            harvestBlockDropsIntoInventory(level, pos, state);
+            level.setBlock(pos, state.setValue(SweetBerryBushBlock.AGE, 1), Block.UPDATE_ALL);
+            return;
+        }
+        if (!(state.getBlock() instanceof CropBlock cropBlock)) {
+            harvestBlockDropsIntoInventory(level, pos, state);
+            level.destroyBlock(pos, false, this.citizen);
+            return;
+        }
+
+        List<ItemStack> rawDrops = new ArrayList<>(
+                Block.getDrops(state, level, pos, level.getBlockEntity(pos), this.citizen, this.citizen.getMainHandItem())
+        );
+        Item seedItem = resolveSeedItemForCrop(cropBlock);
+        boolean seedConsumed = false;
+
+        for (ItemStack drop : rawDrops) {
+            if (!drop.isEmpty() && drop.is(seedItem)) {
+                drop.shrink(1);
+                seedConsumed = true;
+                break;
+            }
+        }
+
+        if (!seedConsumed) {
+            CitizenInventory inv = this.citizen.getCitizenInventory();
+            int seedSlot = inv.findSlotMatching(s -> s.is(seedItem));
+            if (seedSlot < 0) {
+                ItemStack fetchedSeed = StorageLogisticsHelper.extractMatchingItem(
+                        level,
+                        manager,
+                        s -> s.is(seedItem),
+                        1
+                );
+                if (!fetchedSeed.isEmpty()) {
+                    seedConsumed = true;
+                }
+            } else {
+                ItemStack invSeed = inv.getItem(seedSlot);
+                invSeed.shrink(1);
+                if (invSeed.isEmpty()) {
+                    inv.setItem(seedSlot, ItemStack.EMPTY);
+                }
+                seedConsumed = true;
+            }
+        }
+
+        for (ItemStack drop : rawDrops) {
+            if (drop.isEmpty()) {
+                continue;
+            }
+            ItemStack remainder = this.citizen.getCitizenInventory().insertStack(drop);
+            if (!remainder.isEmpty()) {
+                Block.popResource(level, pos, remainder);
+            }
+        }
+
+        if (seedConsumed) {
+            level.setBlock(pos, cropBlock.getStateForAge(0), Block.UPDATE_ALL);
+        } else {
+            level.destroyBlock(pos, false, this.citizen);
+        }
+    }
+
+    public static Item resolveSeedItemForCrop(CropBlock cropBlock) {
+        if (cropBlock == Blocks.CARROTS) {
+            return Items.CARROT;
+        }
+        if (cropBlock == Blocks.POTATOES) {
+            return Items.POTATO;
+        }
+        if (cropBlock == Blocks.BEETROOTS) {
+            return Items.BEETROOT_SEEDS;
+        }
+        if (cropBlock == Blocks.TORCHFLOWER_CROP) {
+            return Items.TORCHFLOWER_SEEDS;
+        }
+        Item blockAsItem = cropBlock.asItem();
+        return blockAsItem != Items.AIR ? blockAsItem : Items.WHEAT_SEEDS;
     }
 
     private void harvestBlockDropsIntoInventory(ServerLevel level, BlockPos pos, BlockState state) {
@@ -381,6 +554,10 @@ public class CitizenJobFSMGoal extends Goal {
         }
     }
 
+    /**
+     * Consumes 1 building block item from the citizen's inventory or withdraws from STORAGE.
+     * Returns null if no building materials exist in either inventory or storage (never spawns free blocks).
+     */
     private BlockState consumeOrFetchBuildingBlock(ServerLevel level, CityZoneManager manager) {
         CitizenInventory inv = this.citizen.getCitizenInventory();
         int slot = inv.findSlotMatching(StorageLogisticsHelper::isBuildingBlockItem);
@@ -402,7 +579,7 @@ public class CitizenJobFSMGoal extends Goal {
                 return state;
             }
         }
-        return Blocks.OAK_PLANKS.defaultBlockState();
+        return null;
     }
 
     private void tickMoveToStorage(ServerLevel level, CityZoneManager manager) {
@@ -413,8 +590,9 @@ public class CitizenJobFSMGoal extends Goal {
         }
 
         if (this.activeStorageTarget == null) {
+            boolean allowDropOff = this.citizen.getJobType() != JobType.COURIER;
             this.activeStorageTarget = StorageLogisticsHelper
-                    .findNearestStorageWithSpace(level, manager, this.citizen.blockPosition(), ItemStack.EMPTY)
+                    .findNearestDropOffOrStorageWithSpace(level, manager, this.citizen.blockPosition(), ItemStack.EMPTY, allowDropOff)
                     .or(manager::getTownHallPos)
                     .orElse(null);
         }
@@ -447,7 +625,12 @@ public class CitizenJobFSMGoal extends Goal {
             if (stack.isEmpty() || StorageLogisticsHelper.isCombatWeapon(stack)) {
                 continue;
             }
-            ItemStack remainder = StorageLogisticsHelper.depositStack(level, manager, stack);
+            ItemStack remainder = StorageLogisticsHelper.depositStackToTargetOrMainStorage(
+                    level,
+                    manager,
+                    this.activeStorageTarget,
+                    stack
+            );
             inv.setItem(i, remainder);
         }
         this.activeStorageTarget = null;

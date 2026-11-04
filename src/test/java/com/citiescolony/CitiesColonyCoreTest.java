@@ -8,6 +8,7 @@ import com.citiescolony.api.ZoneType;
 import com.citiescolony.client.MouseRaycaster;
 import com.citiescolony.common.city.CityZoneManager;
 import com.citiescolony.common.city.NightWaveDefenseManager;
+import com.citiescolony.common.city.ZoneTaskGenerator;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.phys.Vec3;
@@ -20,6 +21,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CitiesColonyCoreTest {
@@ -64,17 +66,41 @@ class CitiesColonyCoreTest {
     }
 
     @Test
-    void testCityZoneManagerTaskQueueAndZoneLifecycle() {
+    void testCityZoneManagerSpatialIndexAndCanonicalTasks() {
         CityZoneManager manager = new CityZoneManager(List.of(), Optional.empty(), List.of());
         ZoneData loggingZone = manager.createZone(ZoneType.LOGGING, new BlockPos(0, 64, 0), new BlockPos(8, 70, 8));
-
-        assertTrue(manager.getTownHallPos().isPresent(), "First zone creation should initialize Town Hall pos");
         assertEquals(1, manager.getZonesByType(ZoneType.LOGGING).size());
 
-        ColonyTask chop1 = new ColonyTask(ColonyTask.TaskType.CHOP, new BlockPos(2, 65, 2), 60);
+        // Town Hall and Guard Outpost registration lifecycle
+        BlockPos townHallBlockPos = new BlockPos(100, 65, 100);
+        manager.setTownHallPos(townHallBlockPos);
+        assertEquals(Optional.of(townHallBlockPos), manager.getTownHallPos());
+
+        BlockPos outpostPos = new BlockPos(120, 65, 120);
+        manager.registerGuardOutpost(outpostPos);
+        assertEquals(Optional.of(outpostPos), manager.findNearestGuardOutpost(BlockPos.ZERO));
+        manager.unregisterGuardOutpost(outpostPos);
+        assertTrue(manager.findNearestGuardOutpost(BlockPos.ZERO).isEmpty());
+
+        // O(1) spatial index check
+        BlockPos chopPos = new BlockPos(2, 65, 2);
+        ColonyTask chop1 = new ColonyTask(ColonyTask.TaskType.CHOP, chopPos, 60);
         assertTrue(manager.enqueueTask(chop1));
-        assertFalse(manager.enqueueTask(new ColonyTask(ColonyTask.TaskType.CHOP, new BlockPos(2, 65, 2), 60)),
-                "Duplicate active task at same position and type should be rejected");
+        assertTrue(manager.hasActiveTaskAt(chopPos));
+        assertFalse(manager.enqueueTask(new ColonyTask(ColonyTask.TaskType.CHOP, chopPos, 60)),
+                "Duplicate active task at same position should be rejected in O(1)");
+
+        // Canonical task rebinding after deserialization
+        ColonyTask deserializedClone = new ColonyTask(
+                chop1.taskId(),
+                chop1.type(),
+                chop1.targetPos(),
+                chop1.priority(),
+                TaskState.ASSIGNED,
+                Optional.of(UUID.randomUUID())
+        );
+        ColonyTask canonical = manager.resolveCanonicalTask(deserializedClone);
+        assertSame(chop1, canonical, "Deserialized task must rebind to the canonical instance in taskQueue");
 
         UUID lumberjackId = UUID.randomUUID();
         assertTrue(manager.pollNextTaskFor(JobType.MINER, lumberjackId, BlockPos.ZERO).isEmpty(),
@@ -86,7 +112,20 @@ class CitiesColonyCoreTest {
 
         manager.removeZonesIntersecting(new BoundingBox(0, 60, 0, 10, 75, 10));
         assertTrue(manager.getZones().isEmpty());
-        assertFalse(manager. removeZone(loggingZone.id()));
+        assertFalse(manager.hasActiveTaskAt(chopPos), "Spatial index should be cleaned when zone is removed");
+        assertFalse(manager.removeZone(loggingZone.id()));
+    }
+
+    @Test
+    void testStaircaseMiningConstraintAndCourierDeliverSupport() {
+        BoundingBox mineBox = new BoundingBox(0, 50, 0, 10, 64, 10);
+        // At entry edge x=0, only top layer y=64 is allowed so staircase entrance stays intact
+        assertTrue(ZoneTaskGenerator.isWithinStaircaseMiningConstraint(mineBox, new BlockPos(0, 64, 0)));
+        assertFalse(ZoneTaskGenerator.isWithinStaircaseMiningConstraint(mineBox, new BlockPos(0, 60, 0)));
+        // Deeper inside at x=6, mining down to y=58 is allowed
+        assertTrue(ZoneTaskGenerator.isWithinStaircaseMiningConstraint(mineBox, new BlockPos(6, 58, 5)));
+
+        assertTrue(JobType.COURIER.canExecute(ColonyTask.TaskType.DELIVER));
     }
 
     @Test

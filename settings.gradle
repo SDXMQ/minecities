@@ -1,16 +1,4 @@
-pluginManagement {
-    repositories {
-        gradlePluginPortal()
-        maven {
-            name = 'NeoForged'
-            url = 'https://maven.neoforged.net/releases'
-        }
-        mavenCentral()
-    }
-}
+gradle.startParameter.setProjectProperties(new HashMap<>(gradle.startParameter.getProjectProperties()))
+gradle.startParameter.getProjectProperties().put("build.start", Long.toString(System.currentTimeMillis()))
 
-plugins {
-    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
-}
-
-rootProject.name = 'citiescolony'
+rootProject.name = "minecolonies"
