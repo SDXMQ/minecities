@@ -58,4 +58,10 @@ gradle/local.configuration.gradle
 
 runs/
 
+# Temporary and agent artifacts
 .agents/
+archive/
+citiescolony_all*.txt
+repomix-output.xml
+init_cp.gradle
+test_cp.gradle

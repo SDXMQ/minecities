@@ -660,7 +660,7 @@ public final class RtsResourceAggregator
             if (targetPos != null && entityCitizen != null)
             {
                 if (citizenData != null && citizenData.getJob() != null
-                    && citizenData.getJob().getWorkerAI() instanceof com.minecolonies.core.entity.ai.workers.AbstractEntityAIBasic<?> workerAi)
+                    && citizenData.getJob().getWorkerAI() instanceof com.minecolonies.core.entity.ai.workers.AbstractEntityAIBasic<?, ?> workerAi)
                 {
                     workerAi.setDelay(20 * 10); // 10초간 작업 AI가 길찾기를 덮어쓰지 않도록 유예
                 }
