@@ -261,7 +261,7 @@ public final class RtsCameraController
         {
             return MineColonies.getConfig().getClient().rtsZonePlacementMode.get();
         }
-        catch (final Exception ignored)
+        catch (final Throwable ignored)
         {
             return RtsZonePlacementMode.MODE_A_AUTO_PLACE;
         }
@@ -329,7 +329,7 @@ public final class RtsCameraController
         {
             MineColonies.getConfig().getClient().rtsZonePlacementMode.set(nextMode);
         }
-        catch (final Exception ignored)
+        catch (final Throwable ignored)
         {
         }
         return nextMode;

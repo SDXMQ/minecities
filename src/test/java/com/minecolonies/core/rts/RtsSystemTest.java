@@ -1,5 +1,6 @@
 package com.minecolonies.core.rts;
 
+import com.minecolonies.api.colony.jobs.ModJobs;
 import com.minecolonies.api.configuration.RtsZonePlacementMode;
 import com.minecolonies.core.client.rts.RtsCameraController;
 import com.minecolonies.core.client.rts.RtsMousePicker;
@@ -14,11 +15,11 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.util.Mth;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
-import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.util.List;
@@ -47,7 +48,7 @@ public class RtsSystemTest
     {
         final RtsSystemTest suite = new RtsSystemTest();
         suite.runAllTests();
-        System.out.println("=== ALL RTS SYSTEM TESTS PASSED (12/12) ===");
+        System.out.println("=== ALL RTS SYSTEM TESTS PASSED (15/15) ===");
     }
 
     public void runAllTests()
@@ -60,24 +61,37 @@ public class RtsSystemTest
         testRtsCameraControllerClampingAndPanning();
         testRtsNetworkPacketsSerialization();
 
-        // 5 New Specification Tests
+        // 5 Specification Tests
         testRtsCameraToggleAndMovementSuppression();
         testRtsZoneDragSelectionAndBuildingAssociation();
         testRtsZonePlacementModeAandBBehavior();
         testRtsTopBarHudResourceSyncAndFormatting();
         testRtsCitizenRoadSpeedBuffAndRemoval();
+
+        // Stage 1-3 Regression Tests
+        testRtsBlueprintPathResolutionAndNormalization();
+        testRtsCameraCenteringAndDragThreshold();
+        testRtsToolbarLayoutBoundsAndHitTesting();
     }
 
-    @Test
     public void testRtsZoneTypeCyclingAndMetadata()
     {
+        assertEquals(7, RtsZoneType.values().length);
+
         RtsZoneType current = RtsZoneType.RESIDENTIAL;
         assertEquals(RtsZoneType.LOGGING, current = current.next());
         assertEquals(RtsZoneType.MINING, current = current.next());
         assertEquals(RtsZoneType.FARMING, current = current.next());
         assertEquals(RtsZoneType.STORAGE, current = current.next());
         assertEquals(RtsZoneType.DEFENSE, current = current.next());
+        assertEquals(RtsZoneType.BUILDER, current = current.next());
         assertEquals(RtsZoneType.RESIDENTIAL, current.next());
+
+        assertEquals(6, RtsZoneType.BUILDER.id());
+        assertEquals(ModJobs.BUILDER_ID, RtsZoneType.BUILDER.getDefaultJobId());
+        assertEquals(RtsZoneType.BUILDER, RtsZoneType.byId(6));
+        assertEquals(RtsZoneType.RESIDENTIAL, RtsZoneType.byId(-1));
+        assertEquals(RtsZoneType.RESIDENTIAL, RtsZoneType.byId(99));
 
         for (final RtsZoneType type : RtsZoneType.values())
         {
@@ -99,7 +113,6 @@ public class RtsSystemTest
         }
     }
 
-    @Test
     public void testRtsZonePlacementModeCycling()
     {
         final RtsZonePlacementMode modeA = RtsZonePlacementMode.MODE_A_AUTO_PLACE;
@@ -111,7 +124,6 @@ public class RtsSystemTest
         assertTrue(modeB.getDisplayName().contains("방식B"));
     }
 
-    @Test
     public void testRtsZoneDataNbtAndByteSerialization()
     {
         final UUID id = UUID.randomUUID();
@@ -147,7 +159,6 @@ public class RtsSystemTest
         assertNull(fromBufNull.linkedBuildingPos());
     }
 
-    @Test
     public void testRtsZoneSavedDataCrudAndIntersectionRemoval()
     {
         final RtsZoneSavedData savedData = new RtsZoneSavedData();
@@ -197,7 +208,6 @@ public class RtsSystemTest
         assertEquals(1, loaded.getZones().size());
     }
 
-    @Test
     public void testRtsMousePickerRayUnprojection()
     {
         final Vec3 camPos = new Vec3(100.0D, 90.0D, -50.0D);
@@ -236,7 +246,6 @@ public class RtsSystemTest
         assertEquals(1.0D, degenerateRay.direction().length(), 1.0E-5D);
     }
 
-    @Test
     public void testRtsCameraControllerClampingAndPanning()
     {
         assertEquals(12.0D, RtsCameraController.clampAltitude(5.0D));
@@ -259,7 +268,6 @@ public class RtsSystemTest
         assertTrue(highPan.length() > lowPan.length());
     }
 
-    @Test
     public void testRtsNetworkPacketsSerialization()
     {
         final RtsZoneData zone = new RtsZoneData(
@@ -316,7 +324,6 @@ public class RtsSystemTest
         cmdOut.fromBytes(cmdBuf);
     }
 
-    @Test
     public void testRtsCameraToggleAndMovementSuppression()
     {
         final Input input = new Input();
@@ -360,7 +367,6 @@ public class RtsSystemTest
         }
     }
 
-    @Test
     public void testRtsZoneDragSelectionAndBuildingAssociation()
     {
         // 1. Reverse drag normalization: (25, 70, 30) -> (10, 64, 10)
@@ -426,7 +432,6 @@ public class RtsSystemTest
         assertEquals(0, savedData.getZones().size());
     }
 
-    @Test
     public void testRtsZonePlacementModeAandBBehavior()
     {
         final RtsZonePlacementMode modeA = RtsZonePlacementMode.MODE_A_AUTO_PLACE;
@@ -469,7 +474,6 @@ public class RtsSystemTest
         assertEquals(RtsZonePlacementMode.MODE_B_BLUEPRINT_PREVIEW, getPlacementMode(msgOutB));
     }
 
-    @Test
     public void testRtsTopBarHudResourceSyncAndFormatting()
     {
         final RtsResourceAggregator.ColonySnapshot snapshot = new RtsResourceAggregator.ColonySnapshot(
@@ -507,7 +511,6 @@ public class RtsSystemTest
         assertEquals("식량: 1250 | 목재: 640 | 석재: 320 | 광물: 85 | 시민: 24/30 (유휴:4) | 행복도: 8.7/10", formatted);
     }
 
-    @Test
     public void testRtsCitizenRoadSpeedBuffAndRemoval()
     {
         try
@@ -549,6 +552,201 @@ public class RtsSystemTest
         assertEquals(0.325D, boostedSpeed, 1.0E-6D);
         final double restoredSpeed = boostedSpeed / (1.0D + RtsResourceAggregator.ROAD_SPEED_BOOST_AMOUNT);
         assertEquals(0.25D, restoredSpeed, 1.0E-6D);
+    }
+
+    public void testRtsBlueprintPathResolutionAndNormalization()
+    {
+        assertEquals(
+            "fundamentals/builder1.blueprint",
+            RtsResourceAggregator.normalizeBlueprintSubPath("/fundamentals\\builder")
+        );
+        assertEquals(
+            "fundamentals/lumberjack1.blueprint",
+            RtsResourceAggregator.normalizeBlueprintSubPath("//fundamentals/lumberjack1.blueprint")
+        );
+        assertEquals(
+            "agriculture/horticulture/farmer1.blueprint",
+            RtsResourceAggregator.normalizeBlueprintSubPath("  agriculture\\horticulture/farmer  ")
+        );
+
+        assertEquals(
+            "fundamentals/builder1.blueprint",
+            RtsResourceAggregator.resolveFallbackBlueprintPath("Caledonia", RtsZoneType.BUILDER.getDefaultSchematicName())
+        );
+        assertEquals(
+            "agriculture/horticulture/farmer1.blueprint",
+            RtsResourceAggregator.resolveFallbackBlueprintPath("Caledonia", RtsZoneType.FARMING.getDefaultSchematicName())
+        );
+        assertEquals(
+            "military/guardtower1.blueprint",
+            RtsResourceAggregator.resolveFallbackBlueprintPath("Caledonia", RtsZoneType.DEFENSE.getDefaultSchematicName())
+        );
+        assertEquals(
+            "craftsmanship/storage/warehouse1.blueprint",
+            RtsResourceAggregator.resolveFallbackBlueprintPath("Caledonia", RtsZoneType.STORAGE.getDefaultSchematicName())
+        );
+        assertEquals(
+            "fundamentals/customhut1.blueprint",
+            RtsResourceAggregator.resolveFallbackBlueprintPath("Unknown Style", "customhut")
+        );
+    }
+
+    public void testRtsCameraCenteringAndDragThreshold()
+    {
+        final Vec3 focus = new Vec3(291.5D, 69.0D, 250.5D);
+        final float[] yaws = {0.0F, 90.0F, -60.0F, 215.0F};
+        final float[] pitches = {20.0F, 45.0F, 52.5F, 60.0F, 85.0F};
+        final double[] altitudes = {5.0D, 12.0D, 25.0D, 80.0D, 120.0D};
+
+        for (final float yawDeg : yaws)
+        {
+            for (final float rawPitch : pitches)
+            {
+                for (final double rawAlt : altitudes)
+                {
+                    final double clampedAlt = RtsCameraController.clampAltitude(rawAlt);
+                    final float clampedPitch = RtsCameraController.clampPitch(rawPitch);
+                    final Vec3 camPos = RtsCameraController.computeInitialCameraPos(focus, yawDeg, rawPitch, rawAlt);
+                    assertEquals(focus.y + clampedAlt, camPos.y, 1.0E-5D);
+
+                    final float yawRad = yawDeg * Mth.DEG_TO_RAD;
+                    final float pitchRad = clampedPitch * Mth.DEG_TO_RAD;
+                    final double lookX = -Math.sin(yawRad) * Math.cos(pitchRad);
+                    final double lookY = -Math.sin(pitchRad);
+                    final double lookZ = Math.cos(yawRad) * Math.cos(pitchRad);
+
+                    final double t = (focus.y - camPos.y) / lookY;
+                    final double hitX = camPos.x + t * lookX;
+                    final double hitY = camPos.y + t * lookY;
+                    final double hitZ = camPos.z + t * lookZ;
+
+                    assertEquals(focus.x, hitX, 1.0E-2D);
+                    assertEquals(focus.y, hitY, 1.0E-4D);
+                    assertEquals(focus.z, hitZ, 1.0E-2D);
+                }
+            }
+        }
+
+        assertFalse(RtsCameraController.isDragThresholdMet(100.0D, 100.0D, 100.0D, 100.0D));
+        assertFalse(RtsCameraController.isDragThresholdMet(100.0D, 100.0D, 105.9D, 100.0D));
+        assertFalse(RtsCameraController.isDragThresholdMet(100.0D, 100.0D, 104.0D, 104.0D));
+        assertTrue(RtsCameraController.isDragThresholdMet(100.0D, 100.0D, 106.0D, 100.0D));
+        assertTrue(RtsCameraController.isDragThresholdMet(100.0D, 100.0D, 105.0D, 105.0D));
+    }
+
+    public void testRtsToolbarLayoutBoundsAndHitTesting()
+    {
+        final int[][] viewports = {
+            {427, 240},
+            {640, 360},
+            {320, 200}
+        };
+
+        for (final int[] vp : viewports)
+        {
+            final int w = vp[0];
+            final int h = vp[1];
+            final List<RtsTopBarOverlay.ToolbarButton> buttons = RtsTopBarOverlay.computeToolbarButtons(
+                w,
+                h,
+                RtsZonePlacementMode.MODE_A_AUTO_PLACE,
+                "기본"
+            );
+            assertEquals(RtsZoneType.values().length + 3, buttons.size());
+
+            for (int i = 0; i < buttons.size(); i++)
+            {
+                final RtsTopBarOverlay.ToolbarButton a = buttons.get(i);
+                assertTrue(a.x() >= 0);
+                assertTrue(a.y() >= RtsTopBarOverlay.TOP_BAR_HEIGHT);
+                assertTrue(a.x() + a.width() <= w);
+                assertTrue(a.y() + a.height() <= h);
+
+                final double cx = a.x() + a.width() / 2.0D;
+                final double cy = a.y() + a.height() / 2.0D;
+                final RtsTopBarOverlay.ToolbarButton hit = RtsTopBarOverlay.findToolbarButtonAt(
+                    w,
+                    h,
+                    RtsZonePlacementMode.MODE_A_AUTO_PLACE,
+                    "기본",
+                    cx,
+                    cy
+                );
+                assertNotNull(hit);
+                assertEquals(a.actionType(), hit.actionType());
+                assertEquals(a.zoneType(), hit.zoneType());
+                assertTrue(RtsTopBarOverlay.isHudBlockingPoint(buttons, cx, cy));
+
+                for (int j = i + 1; j < buttons.size(); j++)
+                {
+                    final RtsTopBarOverlay.ToolbarButton b = buttons.get(j);
+                    final boolean separated = (a.x() + a.width() <= b.x())
+                        || (b.x() + b.width() <= a.x())
+                        || (a.y() + a.height() <= b.y())
+                        || (b.y() + b.height() <= a.y());
+                    assertTrue(separated);
+                }
+            }
+
+            final int[] dock = RtsTopBarOverlay.computeToolbarDockBounds(buttons);
+            assertTrue(dock[0] >= 0);
+            assertTrue(dock[1] >= RtsTopBarOverlay.TOP_BAR_HEIGHT - 2);
+            assertTrue(dock[2] <= w);
+            assertTrue(dock[3] <= h);
+            if (w == 427 && h == 240)
+            {
+                assertTrue(dock[3] <= h - 22);
+            }
+
+            assertTrue(RtsTopBarOverlay.isHudBlockingPoint(buttons, w / 2.0D, 10.0D));
+            assertNull(RtsTopBarOverlay.findToolbarButtonAt(
+                w,
+                h,
+                RtsZonePlacementMode.MODE_A_AUTO_PLACE,
+                "기본",
+                w / 2.0D,
+                80.0D
+            ));
+            assertFalse(RtsTopBarOverlay.isHudBlockingPoint(buttons, w / 2.0D, 80.0D));
+        }
+
+        final RtsZoneType originalZone = RtsCameraController.getActiveZoneType();
+        final boolean originalDelete = RtsCameraController.isDeleteMode();
+        final RtsZonePlacementMode originalMode = RtsCameraController.getActivePlacementMode();
+        try
+        {
+            assertTrue(RtsCameraController.toggleDeleteMode() != originalDelete);
+            RtsCameraController.setActiveZoneType(RtsZoneType.BUILDER);
+            assertEquals(RtsZoneType.BUILDER, RtsCameraController.getActiveZoneType());
+            assertFalse(RtsCameraController.isDeleteMode());
+
+            final RtsZonePlacementMode toggledMode = RtsCameraController.cyclePlacementMode();
+            assertEquals(originalMode.next(), toggledMode);
+            assertEquals(originalMode, RtsCameraController.cyclePlacementMode());
+
+            for (int i = 0; i < 8; i++)
+            {
+                RtsCameraController.cycleCitizenJob();
+            }
+            assertEquals("기본", RtsCameraController.getActiveJobShortLabel());
+            assertNull(RtsCameraController.getActiveJobIdOverride());
+        }
+        finally
+        {
+            RtsCameraController.setActiveZoneType(originalZone);
+            if (originalDelete)
+            {
+                RtsCameraController.toggleDeleteMode();
+            }
+            if (RtsCameraController.getActivePlacementMode() != originalMode)
+            {
+                RtsCameraController.cyclePlacementMode();
+            }
+            for (int guard = 0; guard < 16 && RtsCameraController.getActiveJobIdOverride() != null; guard++)
+            {
+                RtsCameraController.cycleCitizenJob();
+            }
+        }
     }
 
     private static RtsZonePlacementMode getPlacementMode(final RtsZoneActionMessage msg)
