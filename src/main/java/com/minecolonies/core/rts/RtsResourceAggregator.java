@@ -1,10 +1,19 @@
 package com.minecolonies.core.rts;
 
+import com.ldtteam.structurize.blueprints.v1.Blueprint;
+import com.ldtteam.structurize.blueprints.v1.BlueprintTagUtils;
+import com.ldtteam.structurize.storage.StructurePackMeta;
+import com.ldtteam.structurize.storage.StructurePacks;
+import com.minecolonies.api.blocks.AbstractBlockHut;
+import com.minecolonies.api.blocks.ModBlocks;
 import com.minecolonies.api.colony.ICitizenData;
 import com.minecolonies.api.colony.IColony;
 import com.minecolonies.api.colony.IColonyManager;
+import com.minecolonies.api.colony.buildingextensions.IBuildingExtension;
+import com.minecolonies.api.colony.buildingextensions.registry.BuildingExtensionRegistries;
 import com.minecolonies.api.colony.buildings.IBuilding;
 import com.minecolonies.api.colony.permissions.Action;
+import com.minecolonies.api.compatibility.newstruct.BlueprintMapping;
 import com.minecolonies.api.configuration.RtsZonePlacementMode;
 import com.minecolonies.api.crafting.ItemStorage;
 import com.minecolonies.api.entity.citizen.AbstractEntityCitizen;
@@ -13,9 +22,14 @@ import com.minecolonies.api.tileentities.MinecoloniesTileEntities;
 import com.minecolonies.api.util.WorldUtil;
 import com.minecolonies.core.MineColonies;
 import com.minecolonies.core.Network;
+import com.minecolonies.core.blocks.BlockScarecrow;
+import com.minecolonies.core.colony.buildingextensions.FarmField;
 import com.minecolonies.core.colony.buildings.AbstractBuildingGuards;
+import com.minecolonies.core.colony.buildings.modules.BuildingExtensionsModule;
+import com.minecolonies.core.colony.buildings.modules.BuildingModules;
 import com.minecolonies.core.colony.buildings.modules.LivingBuildingModule;
 import com.minecolonies.core.colony.buildings.modules.WorkerBuildingModule;
+import com.minecolonies.core.colony.buildings.workerbuildings.BuildingBuilder;
 import com.minecolonies.core.colony.buildings.workerbuildings.BuildingLumberjack;
 import com.minecolonies.core.colony.buildings.workerbuildings.BuildingWareHouse;
 import com.minecolonies.core.network.messages.client.RtsSyncMessage;
@@ -23,9 +37,11 @@ import com.minecolonies.core.tileentities.TileEntityColonyBuilding;
 import com.minecolonies.core.tileentities.TileEntityRack;
 import com.minecolonies.core.util.AttributeModifierUtils;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.Container;
@@ -33,10 +49,12 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraftforge.common.Tags;
@@ -404,6 +422,10 @@ public final class RtsResourceAggregator
             || state.is(Blocks.MUD_BRICKS);
     }
 
+    private record ZonePlacementResult(@Nullable BlockPos linkedBuildingPos, @Nullable String feedbackOverride)
+    {
+    }
+
     /**
      * Handles an RTS zone creation or deletion request from the client.
      */
@@ -453,17 +475,19 @@ public final class RtsResourceAggregator
                 final BlockPos hutPos = zone.linkedBuildingPos();
                 if (hutPos != null && WorldUtil.isBlockLoaded(level, hutPos))
                 {
-                    if (colony != null)
+                    final IBuilding building = colony != null ? colony.getServerBuildingManager().getBuilding(hutPos) : null;
+                    if (building != null && building.getBuildingLevel() > 0)
                     {
-                        final IBuilding building = colony.getServerBuildingManager().getBuilding(hutPos);
-                        if (building != null && building.getBuildingLevel() == 0)
-                        {
-                            building.removeWorkOrder();
-                            building.destroy();
-                        }
+                        // Keep completed Lv.1+ MineColonies buildings intact; only unlink the RTS zone overlay.
+                        continue;
+                    }
+                    if (building != null)
+                    {
+                        building.removeWorkOrder();
+                        building.destroy();
                     }
                     final BlockState state = level.getBlockState(hutPos);
-                    if (state.getBlock() instanceof com.minecolonies.api.blocks.AbstractBlockHut
+                    if (state.getBlock() instanceof AbstractBlockHut
                         || level.getBlockEntity(hutPos) instanceof AbstractTileEntityColonyBuilding)
                     {
                         level.removeBlock(hutPos, false);
@@ -477,110 +501,331 @@ public final class RtsResourceAggregator
             return;
         }
 
+        if (colony == null)
+        {
+            player.displayClientMessage(
+                Component.literal("[RTS] 정착지(Colony)를 먼저 설립해야 구역을 지정할 수 있습니다. 시청(Town Hall)을 설치/우클릭하세요."),
+                true
+            );
+            return;
+        }
+
         final RtsZonePlacementMode mode = requestedPlacementMode != null
             ? requestedPlacementMode
             : MineColonies.getConfig().getServer().rtsZonePlacementMode.get();
 
-        BlockPos linkedBuildingPos = null;
+        ZonePlacementResult placementResult = new ZonePlacementResult(null, null);
         if (mode == RtsZonePlacementMode.MODE_A_AUTO_PLACE)
         {
-            linkedBuildingPos = autoPlaceOrLinkZoneBuilding(level, player, colony, zoneType, box, centerPos);
+            placementResult = autoPlaceOrLinkZoneBuilding(level, player, colony, zoneType, box, centerPos);
         }
 
-        final int colonyId = colony != null ? colony.getID() : 0;
-        savedData.addOrReplaceZone(new RtsZoneData(UUID.randomUUID(), colonyId, zoneType, box, linkedBuildingPos));
-        player.displayClientMessage(
-            Component.literal("[RTS] " + zoneType.getDisplayName() + " 설정 완료 (" + mode.getDisplayName() + ")"),
-            true
-        );
+        savedData.addOrReplaceZone(new RtsZoneData(
+            UUID.randomUUID(),
+            colony.getID(),
+            zoneType,
+            box,
+            placementResult.linkedBuildingPos()
+        ));
+
+        final String message = placementResult.feedbackOverride() != null
+            ? placementResult.feedbackOverride()
+            : "[RTS] " + zoneType.getDisplayName() + " 설정 완료 (" + mode.getDisplayName() + ")";
+        player.displayClientMessage(Component.literal(message), true);
         syncPlayerColonySnapshot(level, player);
     }
 
-    @Nullable
-    private static BlockPos autoPlaceOrLinkZoneBuilding(
+    @NotNull
+    private static ZonePlacementResult autoPlaceOrLinkZoneBuilding(
         @NotNull final ServerLevel level,
         @NotNull final ServerPlayer player,
-        @Nullable final IColony colony,
+        @NotNull final IColony colony,
         @NotNull final RtsZoneType zoneType,
         @NotNull final BoundingBox box,
         @NotNull final BlockPos centerPos)
     {
-        final int surfaceY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, centerPos.getX(), centerPos.getZ());
-        final int targetY = Mth.clamp(surfaceY, level.getMinBuildHeight() + 1, level.getMaxBuildHeight() - 2);
-        final BlockPos hutPos = new BlockPos(centerPos.getX(), targetY, centerPos.getZ());
-
-        if (!WorldUtil.isBlockLoaded(level, hutPos))
+        // First check if a colony building already exists inside the zone bounds (prefer matching hut type)
+        IBuilding existingInside = null;
+        final AbstractBlockHut<?> targetHutBlock = zoneType.getDefaultHutBlock();
+        for (final Map.Entry<BlockPos, IBuilding> entry : colony.getServerBuildingManager().getBuildings().entrySet())
         {
+            final BlockPos bPos = entry.getKey();
+            if (bPos.getX() >= box.minX() && bPos.getX() <= box.maxX()
+                && bPos.getZ() >= box.minZ() && bPos.getZ() <= box.maxZ()
+                && Math.abs(bPos.getY() - centerPos.getY()) <= 16)
+            {
+                if (targetHutBlock != null && level.getBlockState(bPos).is(targetHutBlock))
+                {
+                    existingInside = entry.getValue();
+                    break;
+                }
+                if (existingInside == null)
+                {
+                    existingInside = entry.getValue();
+                }
+            }
+        }
+        if (existingInside != null)
+        {
+            configureZoneSpecificBuilding(level, colony, existingInside, zoneType, box, existingInside.getPosition());
+            final String upgradeFeedback = ensureWorkerAndRequestUpgrade(player, colony, existingInside, zoneType, existingInside.getPosition());
+            return new ZonePlacementResult(existingInside.getPosition(), upgradeFeedback);
+        }
+
+        final BlockPos hutPos = findPlaceableSurfacePos(level, box, centerPos);
+        if (hutPos == null || !WorldUtil.isBlockLoaded(level, hutPos) || targetHutBlock == null)
+        {
+            return new ZonePlacementResult(null, "[RTS] 구역 내 건물을 배치할 빈 평지 공간을 찾지 못했습니다.");
+        }
+
+        final String stylePack = !colony.getStructurePack().isEmpty() ? colony.getStructurePack() : "Caledonia";
+        final String blueprintPath = resolveBlueprintPath(stylePack, zoneType);
+
+        final BlockState hutState = targetHutBlock.defaultBlockState();
+        level.setBlockAndUpdate(hutPos, hutState);
+
+        final BlockEntity be = level.getBlockEntity(hutPos);
+        final AbstractTileEntityColonyBuilding buildingTe;
+        if (be instanceof AbstractTileEntityColonyBuilding castTe)
+        {
+            buildingTe = castTe;
+        }
+        else
+        {
+            buildingTe = new TileEntityColonyBuilding(MinecoloniesTileEntities.BUILDING.get(), hutPos, hutState);
+            level.setBlockEntity(buildingTe);
+        }
+
+        buildingTe.setPackName(stylePack);
+        buildingTe.setBlueprintPath(blueprintPath);
+        targetHutBlock.setPlacedBy(level, hutPos, hutState, player, new ItemStack(targetHutBlock));
+
+        IBuilding building = colony.getServerBuildingManager().getBuilding(hutPos);
+        if (building == null && level.getBlockEntity(hutPos) instanceof AbstractTileEntityColonyBuilding te)
+        {
+            building = colony.getServerBuildingManager().addNewBuilding(te, level);
+        }
+        if (building != null)
+        {
+            building.setStructurePack(stylePack);
+            building.setBlueprintPath(blueprintPath);
+            configureZoneSpecificBuilding(level, colony, building, zoneType, box, hutPos);
+            final String upgradeFeedback = ensureWorkerAndRequestUpgrade(player, colony, building, zoneType, hutPos);
+            return new ZonePlacementResult(hutPos, upgradeFeedback);
+        }
+
+        return new ZonePlacementResult(hutPos, null);
+    }
+
+    @Nullable
+    private static BlockPos findPlaceableSurfacePos(
+        @NotNull final ServerLevel level,
+        @NotNull final BoundingBox box,
+        @NotNull final BlockPos centerPos)
+    {
+        final int minX = box.minX();
+        final int maxX = box.maxX();
+        final int minZ = box.minZ();
+        final int maxZ = box.maxZ();
+        final int maxRadius = Math.max(maxX - minX, maxZ - minZ);
+
+        for (int radius = 0; radius <= maxRadius; radius++)
+        {
+            for (int dx = -radius; dx <= radius; dx++)
+            {
+                for (int dz = -radius; dz <= radius; dz++)
+                {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != radius)
+                    {
+                        continue;
+                    }
+                    final int x = centerPos.getX() + dx;
+                    final int z = centerPos.getZ() + dz;
+                    if (x < minX || x > maxX || z < minZ || z > maxZ)
+                    {
+                        continue;
+                    }
+                    final int surfaceY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+                    final int targetY = Mth.clamp(surfaceY, level.getMinBuildHeight() + 1, level.getMaxBuildHeight() - 2);
+                    final BlockPos candidate = new BlockPos(x, targetY, z);
+                    if (!WorldUtil.isBlockLoaded(level, candidate))
+                    {
+                        continue;
+                    }
+                    final BlockState atPos = level.getBlockState(candidate);
+                    final BlockState below = level.getBlockState(candidate.below());
+                    if ((atPos.isAir() || atPos.canBeReplaced())
+                        && atPos.getFluidState().isEmpty()
+                        && !below.isAir()
+                        && below.getFluidState().isEmpty()
+                        && below.isFaceSturdy(level, candidate.below(), Direction.UP)
+                        && !below.is(BlockTags.LOGS)
+                        && !below.is(BlockTags.LEAVES)
+                        && !(below.getBlock() instanceof AbstractBlockHut))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    @NotNull
+    public static String resolveBlueprintPath(@NotNull final String stylePack, @NotNull final RtsZoneType zoneType)
+    {
+        final AbstractBlockHut<?> hutBlock = zoneType.getDefaultHutBlock();
+        if (hutBlock != null)
+        {
+            try
+            {
+                if (StructurePacks.hasPack(stylePack))
+                {
+                    Blueprint match = StructurePacks.findBlueprint(
+                        stylePack,
+                        bp -> !BlueprintTagUtils.isInvisible(bp)
+                            && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
+                            && bp.getFileName().endsWith("1.blueprint")
+                    );
+                    if (match == null)
+                    {
+                        match = StructurePacks.findBlueprint(
+                            stylePack,
+                            bp -> !BlueprintTagUtils.isInvisible(bp)
+                                && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
+                        );
+                    }
+                    final StructurePackMeta meta = StructurePacks.getStructurePack(stylePack);
+                    if (match != null && meta != null && match.getFilePath() != null && match.getFileName() != null)
+                    {
+                        final String subPath = meta.getSubPath(match.getFilePath().resolve(match.getFileName()));
+                        if (subPath != null && !subPath.isEmpty())
+                        {
+                            return normalizeBlueprintSubPath(subPath);
+                        }
+                    }
+                }
+            }
+            catch (final Throwable ignored)
+            {
+            }
+        }
+        return resolveFallbackBlueprintPath(stylePack, zoneType.getDefaultSchematicName());
+    }
+
+    @NotNull
+    public static String resolveFallbackBlueprintPath(@NotNull final String stylePack, @NotNull final String schematic)
+    {
+        final String normalizedStyle = stylePack.toLowerCase(Locale.ROOT).replace(" ", "").trim();
+        final String mappedPath = BlueprintMapping.getPathMapping(normalizedStyle, schematic);
+        final String fallbackPath = BlueprintMapping.getPathMapping("", schematic);
+        final String bpRelative = mappedPath != null
+            ? mappedPath
+            : (fallbackPath != null ? fallbackPath : "fundamentals/" + schematic);
+        return normalizeBlueprintSubPath(bpRelative);
+    }
+
+    @NotNull
+    public static String normalizeBlueprintSubPath(@NotNull final String rawPath)
+    {
+        String clean = rawPath.replace('\\', '/').trim();
+        while (clean.startsWith("/"))
+        {
+            clean = clean.substring(1);
+        }
+        if (clean.endsWith(".blueprint"))
+        {
+            return clean;
+        }
+        return clean + "1.blueprint";
+    }
+
+    @Nullable
+    private static String ensureWorkerAndRequestUpgrade(
+        @NotNull final ServerPlayer player,
+        @NotNull final IColony colony,
+        @NotNull final IBuilding building,
+        @NotNull final RtsZoneType zoneType,
+        @NotNull final BlockPos hutPos)
+    {
+        if (building instanceof BuildingBuilder)
+        {
+            ensureBuilderHasWorker(colony, building);
+            if (building.getAllAssignedCitizen().isEmpty())
+            {
+                return "[RTS] 건축가(Builder) 구역이 배치되었으나 배정할 유휴 시민이 없어 건설 지시를 보류했습니다.";
+            }
+            if (building.getBuildingLevel() == 0 && !building.isPendingConstruction())
+            {
+                building.requestUpgrade(player, BlockPos.ZERO);
+            }
             return null;
         }
 
-        // First check if a colony building already exists inside the zone bounds
-        if (colony != null)
+        if (building.getBuildingLevel() == 0 && !building.isPendingConstruction())
         {
-            for (final Map.Entry<BlockPos, IBuilding> entry : colony.getServerBuildingManager().getBuildings().entrySet())
+            ensureAnyBuilderWithinRangeHasWorker(colony, hutPos);
+            if (!hasActiveBuilderWithinRange(colony, hutPos))
             {
-                if (box.isInside(entry.getKey()))
+                return "[RTS] " + zoneType.getDisplayName() + " 배치됨 - 반경 100블록 내 일꾼이 있는 건축가(Builder) 구역이 필요합니다.";
+            }
+            building.requestUpgrade(player, BlockPos.ZERO);
+        }
+        return null;
+    }
+
+    private static void ensureBuilderHasWorker(@NotNull final IColony colony, @NotNull final IBuilding builderBuilding)
+    {
+        if (!builderBuilding.getAllAssignedCitizen().isEmpty())
+        {
+            return;
+        }
+        final WorkerBuildingModule builderModule = builderBuilding.getModule(BuildingModules.BUILDER_WORK);
+        if (builderModule == null || builderModule.isFull())
+        {
+            return;
+        }
+        final ICitizenData jobless = colony.getCitizenManager().getJoblessCitizen();
+        if (jobless != null)
+        {
+            jobless.setPaused(false);
+            builderModule.assignCitizen(jobless);
+        }
+    }
+
+    private static void ensureAnyBuilderWithinRangeHasWorker(@NotNull final IColony colony, @NotNull final BlockPos sitePos)
+    {
+        for (final IBuilding candidate : colony.getServerBuildingManager().getBuildings().values())
+        {
+            if (candidate instanceof BuildingBuilder
+                && candidate.getPosition().distSqr(sitePos) <= 100.0D * 100.0D
+                && candidate.getAllAssignedCitizen().isEmpty())
+            {
+                ensureBuilderHasWorker(colony, candidate);
+                if (!candidate.getAllAssignedCitizen().isEmpty())
                 {
-                    configureZoneSpecificBuilding(colony, entry.getValue(), zoneType, box, entry.getKey());
-                    return entry.getKey();
+                    return;
                 }
             }
         }
+    }
 
-        final Block hutBlock = zoneType.getDefaultHutBlock();
-        final String stylePack = colony != null ? colony.getStructurePack() : "Caledonia";
-        final String schematic = zoneType.getDefaultSchematicName();
-        final String mappedPath = com.minecolonies.api.compatibility.newstruct.BlueprintMapping.getPathMapping(stylePack, schematic);
-        final String fallbackPath = com.minecolonies.api.compatibility.newstruct.BlueprintMapping.getPathMapping("", schematic);
-        final String bpRelative = mappedPath != null ? mappedPath : (fallbackPath != null ? fallbackPath : schematic);
-        final String blueprintPath = bpRelative.endsWith(".blueprint") ? bpRelative : bpRelative + "1.blueprint";
-
-        final BlockState existing = level.getBlockState(hutPos);
-        if (existing.isAir() || existing.canBeReplaced())
+    private static boolean hasActiveBuilderWithinRange(@NotNull final IColony colony, @NotNull final BlockPos sitePos)
+    {
+        for (final IBuilding candidate : colony.getServerBuildingManager().getBuildings().values())
         {
-            final BlockState hutState = hutBlock.defaultBlockState();
-            level.setBlockAndUpdate(hutPos, hutState);
-
-            final BlockEntity be = level.getBlockEntity(hutPos);
-            final AbstractTileEntityColonyBuilding buildingTe;
-            if (be instanceof AbstractTileEntityColonyBuilding castTe)
+            if (candidate instanceof BuildingBuilder
+                && !candidate.getAllAssignedCitizen().isEmpty()
+                && candidate.getPosition().distSqr(sitePos) <= 100.0D * 100.0D)
             {
-                buildingTe = castTe;
-            }
-            else
-            {
-                buildingTe = new TileEntityColonyBuilding(MinecoloniesTileEntities.BUILDING.get(), hutPos, hutState);
-                level.setBlockEntity(buildingTe);
-            }
-
-            buildingTe.setPackName(stylePack);
-            buildingTe.setBlueprintPath(blueprintPath);
-            hutBlock.setPlacedBy(level, hutPos, hutState, player, new ItemStack(hutBlock));
-        }
-
-        if (colony != null)
-        {
-            IBuilding building = colony.getServerBuildingManager().getBuilding(hutPos);
-            if (building == null && level.getBlockEntity(hutPos) instanceof AbstractTileEntityColonyBuilding te)
-            {
-                building = colony.getServerBuildingManager().addNewBuilding(te, level);
-            }
-            if (building != null)
-            {
-                building.setStructurePack(stylePack);
-                building.setBlueprintPath(blueprintPath);
-                configureZoneSpecificBuilding(colony, building, zoneType, box, hutPos);
-                if (building.getBuildingLevel() == 0 && !building.isPendingConstruction())
-                {
-                    building.requestUpgrade(player, BlockPos.ZERO);
-                }
+                return true;
             }
         }
-
-        return hutPos;
+        return false;
     }
 
     private static void configureZoneSpecificBuilding(
+        @NotNull final ServerLevel level,
         @NotNull final IColony colony,
         @NotNull final IBuilding building,
         @NotNull final RtsZoneType zoneType,
@@ -609,6 +854,134 @@ public final class RtsResourceAggregator
                 }
             }
         }
+        else if (zoneType == RtsZoneType.FARMING)
+        {
+            ensureFarmFieldForZone(level, colony, building, box, buildingPos);
+        }
+    }
+
+    private static void ensureFarmFieldForZone(
+        @NotNull final ServerLevel level,
+        @NotNull final IColony colony,
+        @NotNull final IBuilding building,
+        @NotNull final BoundingBox box,
+        @NotNull final BlockPos buildingPos)
+    {
+        final List<IBuildingExtension> existingFields = colony.getServerBuildingManager().getBuildingExtensions(ext -> {
+            if (ext.getBuildingExtensionType() != BuildingExtensionRegistries.farmField.get())
+            {
+                return false;
+            }
+            final BlockPos p = ext.getPosition();
+            return p.getX() >= box.minX() && p.getX() <= box.maxX()
+                && p.getZ() >= box.minZ() && p.getZ() <= box.maxZ();
+        });
+
+        final BuildingExtensionsModule extModule = building.getFirstModuleOccurance(BuildingExtensionsModule.class);
+        if (!existingFields.isEmpty())
+        {
+            for (final IBuildingExtension ext : existingFields)
+            {
+                if (ext instanceof FarmField farmField && farmField.getSeed().isEmpty())
+                {
+                    farmField.setSeed(new ItemStack(Items.WHEAT_SEEDS));
+                }
+                if (extModule != null && !ext.isTaken())
+                {
+                    extModule.assignExtension(ext);
+                }
+            }
+            return;
+        }
+
+        final BlockPos scarecrowPos = findScarecrowPlacementPos(level, box, buildingPos);
+        if (scarecrowPos == null)
+        {
+            return;
+        }
+
+        final BlockState lower = ModBlocks.blockScarecrow.defaultBlockState().setValue(BlockScarecrow.HALF, DoubleBlockHalf.LOWER);
+        final BlockState upper = lower.setValue(BlockScarecrow.HALF, DoubleBlockHalf.UPPER);
+        level.setBlockAndUpdate(scarecrowPos, lower);
+        level.setBlockAndUpdate(scarecrowPos.above(), upper);
+
+        final FarmField farmField = FarmField.create(scarecrowPos, level);
+        if (farmField != null)
+        {
+            farmField.setSeed(new ItemStack(Items.WHEAT_SEEDS));
+            colony.getServerBuildingManager().addBuildingExtension(farmField);
+            if (extModule != null)
+            {
+                extModule.assignExtension(farmField);
+            }
+        }
+    }
+
+    @Nullable
+    private static BlockPos findScarecrowPlacementPos(
+        @NotNull final ServerLevel level,
+        @NotNull final BoundingBox box,
+        @NotNull final BlockPos buildingPos)
+    {
+        final int minX = box.minX();
+        final int maxX = box.maxX();
+        final int minZ = box.minZ();
+        final int maxZ = box.maxZ();
+        final int centerX = (minX + maxX) / 2;
+        final int centerZ = (minZ + maxZ) / 2;
+
+        for (final int minDistFromHut : new int[]{4, 2})
+        {
+            BlockPos best = null;
+            double bestCenterDistSqr = Double.MAX_VALUE;
+            for (int x = minX; x <= maxX; x++)
+            {
+                for (int z = minZ; z <= maxZ; z++)
+                {
+                    final int hutChebyshev = Math.max(Math.abs(x - buildingPos.getX()), Math.abs(z - buildingPos.getZ()));
+                    if (hutChebyshev < minDistFromHut)
+                    {
+                        continue;
+                    }
+                    final int y = Mth.clamp(
+                        level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z),
+                        level.getMinBuildHeight() + 1,
+                        level.getMaxBuildHeight() - 3
+                    );
+                    final BlockPos candidate = new BlockPos(x, y, z);
+                    if (!WorldUtil.isBlockLoaded(level, candidate))
+                    {
+                        continue;
+                    }
+                    final BlockState atPos = level.getBlockState(candidate);
+                    final BlockState above = level.getBlockState(candidate.above());
+                    final BlockState below = level.getBlockState(candidate.below());
+                    if ((atPos.isAir() || atPos.canBeReplaced())
+                        && (above.isAir() || above.canBeReplaced())
+                        && atPos.getFluidState().isEmpty()
+                        && above.getFluidState().isEmpty()
+                        && !below.isAir()
+                        && below.getFluidState().isEmpty()
+                        && below.isFaceSturdy(level, candidate.below(), Direction.UP)
+                        && !below.is(BlockTags.LOGS)
+                        && !below.is(BlockTags.LEAVES)
+                        && !(below.getBlock() instanceof AbstractBlockHut))
+                    {
+                        final double d2 = (x - centerX) * (x - centerX) + (z - centerZ) * (z - centerZ);
+                        if (d2 < bestCenterDistSqr)
+                        {
+                            bestCenterDistSqr = d2;
+                            best = candidate;
+                        }
+                    }
+                }
+            }
+            if (best != null)
+            {
+                return best;
+            }
+        }
+        return null;
     }
 
     /**

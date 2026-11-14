@@ -12,7 +12,7 @@ import org.jetbrains.annotations.Nullable;
 /**
  * Cities-like RTS Zone categories integrated with MineColonies 1.20.1 huts and jobs.
  * Colors follow the specification:
- * RESIDENTIAL = Green, LOGGING = Brown, MINING = Gray, FARMING = Yellow, STORAGE = Blue, DEFENSE = Red.
+ * RESIDENTIAL = Green, LOGGING = Brown, MINING = Gray, FARMING = Yellow, STORAGE = Blue, DEFENSE = Red, BUILDER = Orange.
  */
 public enum RtsZoneType implements StringRepresentable
 {
@@ -21,7 +21,8 @@ public enum RtsZoneType implements StringRepresentable
     MINING(2, "mining", "채광 (Mining)", 0.55F, 0.58F, 0.62F, "miner", ModJobs.MINER_ID),
     FARMING(3, "farming", "농업 (Farming)", 0.95F, 0.82F, 0.18F, "farmer", ModJobs.FARMER_ID),
     STORAGE(4, "storage", "창고 (Storage)", 0.22F, 0.52F, 0.95F, "warehouse", ModJobs.DELIVERY_ID),
-    DEFENSE(5, "defense", "방어 (Defense)", 0.92F, 0.22F, 0.22F, "guardtower", ModJobs.KNIGHT_ID);
+    DEFENSE(5, "defense", "방어 (Defense)", 0.92F, 0.22F, 0.22F, "guardtower", ModJobs.KNIGHT_ID),
+    BUILDER(6, "builder", "건축가 (Builder)", 0.95F, 0.55F, 0.15F, "builder", ModJobs.BUILDER_ID);
 
     private final int id;
     private final String serializedName;
@@ -125,6 +126,7 @@ public enum RtsZoneType implements StringRepresentable
             case FARMING -> ModBlocks.blockHutFarmer;
             case STORAGE -> ModBlocks.blockHutWareHouse;
             case DEFENSE -> ModBlocks.blockHutGuardTower;
+            case BUILDER -> ModBlocks.blockHutBuilder;
         };
     }
 
@@ -145,12 +147,14 @@ public enum RtsZoneType implements StringRepresentable
 
     public static RtsZoneType byId(final int id)
     {
-        final RtsZoneType[] all = values();
-        if (id < 0 || id >= all.length)
+        for (final RtsZoneType type : values())
         {
-            return RESIDENTIAL;
+            if (type.id == id)
+            {
+                return type;
+            }
         }
-        return all[id];
+        return RESIDENTIAL;
     }
 
     @NotNull

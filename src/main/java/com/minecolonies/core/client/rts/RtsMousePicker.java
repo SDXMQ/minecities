@@ -1,5 +1,6 @@
 package com.minecolonies.core.client.rts;
 
+import com.minecolonies.api.blocks.AbstractBlockHut;
 import com.minecolonies.api.colony.IColonyManager;
 import com.minecolonies.api.colony.IColonyView;
 import com.minecolonies.api.colony.buildings.views.IBuildingView;
@@ -217,5 +218,15 @@ public final class RtsMousePicker
             }
         }
         return closestInside;
+    }
+
+    /**
+     * Checks whether the block at {@code hitPos} is a MineColonies hut block (e.g., an un-founded Town Hall).
+     */
+    public static boolean isHutBlock(@NotNull final Minecraft mc, @Nullable final BlockPos hitPos)
+    {
+        return mc.level != null
+            && hitPos != null
+            && mc.level.getBlockState(hitPos).getBlock() instanceof AbstractBlockHut<?>;
     }
 }

@@ -1,6 +1,12 @@
 package com.minecolonies.core.client.rts;
 
+import com.ldtteam.structurize.blueprints.v1.Blueprint;
+import com.ldtteam.structurize.blueprints.v1.BlueprintTagUtils;
 import com.ldtteam.structurize.client.gui.WindowExtendedBuildTool;
+import com.ldtteam.structurize.storage.StructurePackMeta;
+import com.ldtteam.structurize.storage.StructurePacks;
+import com.ldtteam.structurize.storage.rendering.RenderingCache;
+import com.ldtteam.structurize.storage.rendering.types.BlueprintPreviewData;
 import com.minecolonies.api.colony.ICitizenDataView;
 import com.minecolonies.api.colony.IColonyManager;
 import com.minecolonies.api.colony.IColonyView;
@@ -9,9 +15,11 @@ import com.minecolonies.api.configuration.RtsZonePlacementMode;
 import com.minecolonies.api.entity.citizen.AbstractEntityCitizen;
 import com.minecolonies.core.MineColonies;
 import com.minecolonies.core.Network;
+import com.minecolonies.core.blocks.huts.BlockHutTownHall;
 import com.minecolonies.core.client.gui.WindowBuildBuilding;
 import com.minecolonies.core.client.gui.WindowInteraction;
 import com.minecolonies.core.client.gui.citizen.MainWindowCitizen;
+import com.minecolonies.core.network.messages.server.GetColonyInfoMessage;
 import com.minecolonies.core.network.messages.server.RtsCitizenCommandMessage;
 import com.minecolonies.core.network.messages.server.RtsZoneActionMessage;
 import com.minecolonies.core.network.messages.server.SwitchBuildingWithToolMessage;
@@ -23,6 +31,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.phys.BlockHitResult;
@@ -60,6 +69,20 @@ public final class RtsInteractionBridge
 
         if (!deleteMode && placementMode == RtsZonePlacementMode.MODE_B_BLUEPRINT_PREVIEW)
         {
+            final Minecraft mc = Minecraft.getInstance();
+            final IColonyView colonyView = getActiveClientColonyView(mc);
+            if (colonyView == null && RtsResourceAggregator.getClientSnapshot().colonyId() <= 0)
+            {
+                if (mc.player != null)
+                {
+                    mc.gui.setOverlayMessage(
+                        Component.literal("[RTS] 정착지(Colony)를 먼저 설립해야 구역을 지정할 수 있습니다. 시청(Town Hall)을 설치/우클릭하세요."),
+                        false
+                    );
+                }
+                return;
+            }
+
             final BlockPos center = new BlockPos(
                 (startPos.getX() + endPos.getX()) / 2,
                 Math.max(startPos.getY(), endPos.getY()) + 1,
@@ -88,14 +111,122 @@ public final class RtsInteractionBridge
             return;
         }
 
+        final IColonyView colonyView = getActiveClientColonyView(mc);
+        final String preferredPack = (colonyView != null && !colonyView.getStructurePack().isEmpty())
+            ? colonyView.getStructurePack()
+            : "Caledonia";
+
+        try
+        {
+            if (StructurePacks.hasPack(preferredPack))
+            {
+                StructurePacks.switchSelectedPack(preferredPack);
+            }
+            else
+            {
+                StructurePacks.ensureSelectedPack();
+            }
+        }
+        catch (final Throwable ignored)
+        {
+        }
+
+        final StructurePackMeta selectedPack;
+        String resolvedPack = preferredPack;
+        try
+        {
+            selectedPack = StructurePacks.getSelectedPack();
+            if (selectedPack != null && selectedPack.getName() != null && !selectedPack.getName().isEmpty())
+            {
+                resolvedPack = selectedPack.getName();
+            }
+        }
+        catch (final Throwable ignored)
+        {
+        }
+
         final Block hutBlock = zoneType.getDefaultHutBlock();
-        final ItemStack hutStack = new ItemStack(hutBlock);
-        Network.getNetwork().sendToServer(new SwitchBuildingWithToolMessage(hutStack));
-        new WindowExtendedBuildTool(targetPos, GROUNDSTYLE_RELATIVE).open();
+        final WindowExtendedBuildTool window = new WindowExtendedBuildTool(targetPos, GROUNDSTYLE_RELATIVE);
+
+        try
+        {
+            final BlueprintPreviewData previewData = RenderingCache.getOrCreateBlueprintPreviewData("blueprint");
+            previewData.setPos(targetPos);
+            if (hutBlock != null)
+            {
+                Blueprint matched = null;
+                if (StructurePacks.hasPack(resolvedPack))
+                {
+                    matched = StructurePacks.findBlueprint(
+                        resolvedPack,
+                        bp -> !BlueprintTagUtils.isInvisible(bp)
+                            && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
+                            && bp.getFileName().endsWith("1.blueprint")
+                    );
+                    if (matched == null)
+                    {
+                        matched = StructurePacks.findBlueprint(
+                            resolvedPack,
+                            bp -> !BlueprintTagUtils.isInvisible(bp)
+                                && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
+                        );
+                    }
+                }
+                if (matched != null)
+                {
+                    previewData.setBlueprint(matched);
+                    previewData.syncChangesToServer();
+                    window.selectedBlueprint = matched;
+                }
+                else
+                {
+                    previewData.setBlueprintFuture(StructurePacks.findBlueprintFuture(
+                        resolvedPack,
+                        bp -> !BlueprintTagUtils.isInvisible(bp)
+                            && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
+                    ));
+                }
+            }
+        }
+        catch (final Throwable ignored)
+        {
+        }
+
+        boolean missingHutInSurvival = false;
+        if (hutBlock != null)
+        {
+            final ItemStack hutStack = new ItemStack(hutBlock);
+            Network.getNetwork().sendToServer(new SwitchBuildingWithToolMessage(hutStack));
+            if (!mc.player.isCreative() && !playerHasItem(mc, hutBlock.asItem()))
+            {
+                missingHutInSurvival = true;
+            }
+        }
+
+        window.open();
+        final String hint = missingHutInSurvival
+            ? " (서바이벌 배치 시 해당 오두막 아이템 필요)"
+            : "";
         mc.gui.setOverlayMessage(
-            Component.literal("[RTS 방식 B] " + zoneType.getDisplayName() + " 청사진 상세 배치 창 열기"),
+            Component.literal("[RTS 방식 B] " + zoneType.getDisplayName() + " 청사진 상세 배치 창 열기" + hint),
             false
         );
+    }
+
+    private static boolean playerHasItem(@NotNull final Minecraft mc, @NotNull final Item item)
+    {
+        if (mc.player == null)
+        {
+            return false;
+        }
+        for (int i = 0; i < mc.player.getInventory().getContainerSize(); i++)
+        {
+            if (mc.player.getInventory().getItem(i).is(item))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -151,6 +282,7 @@ public final class RtsInteractionBridge
      *    - Right-clicking a citizen -> opens remote citizen GUI.
      *    - Right-clicking a building -> Shift+Right-Click requests upgrade, normal Right-Click opens remote building GUI
      *      (or if Alt is held & hybrid right-click is enabled, opens Mode B blueprint preview).
+     *    - Right-clicking an un-founded Town Hall block -> requests colony info / opens founding covenant GUI.
      *    - Right-clicking an existing RTS zone -> if hybrid right-click is enabled, opens Mode B blueprint preview
      *      (or linked building GUI).
      */
@@ -255,6 +387,18 @@ public final class RtsInteractionBridge
             else
             {
                 openRemoteBuildingGui(buildingView);
+            }
+            return;
+        }
+
+        // Case 3.5: Un-founded Town Hall block (before colony exists or outside known view)
+        if (mc.level.getBlockState(hitPos).getBlock() instanceof BlockHutTownHall)
+        {
+            if (System.currentTimeMillis() > BlockHutTownHall.timeout)
+            {
+                Network.getNetwork().sendToServer(new GetColonyInfoMessage(hitPos));
+                BlockHutTownHall.timeout = System.currentTimeMillis() + 1000L;
+                mc.gui.setOverlayMessage(Component.literal("[RTS] 시청 정보 및 정착지 설립 창 열기"), false);
             }
             return;
         }
