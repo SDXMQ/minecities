@@ -9,6 +9,12 @@
   "key.minecolonies.rts.toggle_delete": "Toggle Zone Delete Mode (V)",
   "key.minecolonies.rts.cycle_job": "Cycle Citizen Job (J)",
   "key.minecolonies.rts.toggle_placement_mode": "Toggle Placement Mode A/B (B)",
+  "minecolonies.config.rtszoneplacementmode": "RTS Zone Placement Mode",
+  "minecolonies.config.rtszoneplacementmode.comment": "Default RTS zone drag placement mode: MODE_A_AUTO_PLACE or MODE_B_BLUEPRINT_PREVIEW.",
+  "minecolonies.config.rtshybridrightclickmodeb": "RTS Hybrid Right-Click Blueprint Preview",
+  "minecolonies.config.rtshybridrightclickmodeb.comment": "When true, Alt+right-clicking a building or right-clicking an existing zone opens the Mode B blueprint preview window.",
+  "minecolonies.config.rtsroadspeedboost": "RTS Road Movement Speed Boost",
+  "minecolonies.config.rtsroadspeedboost.comment": "When true, citizens receive a movement speed bonus while walking on designated road blocks.",
 
   "com.minecolonies.configgui.title": "MineColonies Config",
   "minecolonies.config.gameplay": "Gameplay Settings",

@@ -118,7 +118,7 @@ public final class RtsTopBarOverlay
         final boolean wide = screenWidth >= 420;
         final int zoneBtnW = wide ? 32 : 28;
         final int deleteBtnW = 32;
-        final int modeBtnW = 38;
+        final int modeBtnW = 40;
         final int jobBtnW = 46;
 
         final int zonesRowW = zoneTypes.length * zoneBtnW + (zoneTypes.length - 1) * gap;
@@ -128,7 +128,7 @@ public final class RtsTopBarOverlay
         final String jobText = "직:" + (shortJobLabel.isEmpty() ? "기본" : shortJobLabel);
 
         final List<ToolbarButton> result = new ArrayList<>(zoneTypes.length + 3);
-        final int bottomRowY = Math.max(TOP_BAR_HEIGHT + 16, screenHeight - 55);
+        final int bottomRowY = Math.max(TOP_BAR_HEIGHT + 16, screenHeight - 58);
 
         if (combinedW + 10 <= screenWidth)
         {
@@ -266,6 +266,28 @@ public final class RtsTopBarOverlay
             maxY = Math.max(maxY, btn.y() + btn.height());
         }
         return new int[]{minX - 3, minY - 3, maxX + 3, maxY + 3};
+    }
+
+    /**
+     * Returns the Y anchor for the vanilla chat overlay so chat lines render cleanly above both the RTS bottom dock and ActionBar.
+     */
+    public static int getPreferredChatBottomY(final int screenWidth, final int screenHeight)
+    {
+        final List<ToolbarButton> buttons = computeToolbarButtons(
+            screenWidth,
+            screenHeight,
+            RtsZonePlacementMode.MODE_A_AUTO_PLACE,
+            "기본"
+        );
+        final int[] dock = computeToolbarDockBounds(buttons);
+        final int defaultChatY = Math.max(40, screenHeight - 40);
+        if (dock[1] <= TOP_BAR_HEIGHT)
+        {
+            return defaultChatY;
+        }
+        final int aboveDockY = Math.max(TOP_BAR_HEIGHT + 24, dock[1] - 4);
+        final int aboveActionBarY = Math.max(TOP_BAR_HEIGHT + 24, screenHeight - 75);
+        return Math.min(defaultChatY, Math.min(aboveDockY, aboveActionBarY));
     }
 
     @Nullable

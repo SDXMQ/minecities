@@ -561,6 +561,14 @@ public class RtsSystemTest
             RtsResourceAggregator.normalizeBlueprintSubPath("/fundamentals\\builder")
         );
         assertEquals(
+            "fundamentals/builder1.blueprint",
+            RtsResourceAggregator.normalizeBlueprintSubPath("fundamentals/builder1")
+        );
+        assertEquals(
+            "agriculture/horticulture/alfarmer1.blueprint",
+            RtsResourceAggregator.normalizeBlueprintSubPath("agriculture/horticulture/alfarmer1")
+        );
+        assertEquals(
             "fundamentals/lumberjack1.blueprint",
             RtsResourceAggregator.normalizeBlueprintSubPath("//fundamentals/lumberjack1.blueprint")
         );
@@ -693,9 +701,15 @@ public class RtsSystemTest
             assertTrue(dock[1] >= RtsTopBarOverlay.TOP_BAR_HEIGHT - 2);
             assertTrue(dock[2] <= w);
             assertTrue(dock[3] <= h);
+            final int chatY = RtsTopBarOverlay.getPreferredChatBottomY(w, h);
+            assertTrue(chatY < dock[1]);
+            if (h >= 240)
+            {
+                assertTrue(chatY <= h - 75);
+            }
             if (w == 427 && h == 240)
             {
-                assertTrue(dock[3] <= h - 22);
+                assertTrue(dock[3] <= h - 39);
             }
 
             assertTrue(RtsTopBarOverlay.isHudBlockingPoint(buttons, w / 2.0D, 10.0D));

@@ -149,6 +149,25 @@ public class ClientEventHandler
     }
 
     @SubscribeEvent
+    public static void onRtsChatOverlay(@NotNull final CustomizeGuiOverlayEvent.Chat event)
+    {
+        if (!com.minecolonies.core.client.rts.RtsCameraController.isActive())
+        {
+            return;
+        }
+        final Minecraft mc = Minecraft.getInstance();
+        if (mc.options.hideGui)
+        {
+            return;
+        }
+        final int preferredY = com.minecolonies.core.client.rts.RtsTopBarOverlay.getPreferredChatBottomY(
+            mc.getWindow().getGuiScaledWidth(),
+            mc.getWindow().getGuiScaledHeight()
+        );
+        event.setPosY(Math.min(event.getPosY(), preferredY));
+    }
+
+    @SubscribeEvent
     public static void onRtsMovementInputUpdate(@NotNull final MovementInputUpdateEvent event)
     {
         com.minecolonies.core.client.rts.RtsCameraController.onMovementInputUpdate(event);

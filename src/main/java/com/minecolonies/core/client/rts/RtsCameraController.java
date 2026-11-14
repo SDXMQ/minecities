@@ -1051,12 +1051,12 @@ public final class RtsCameraController
             return;
         }
         final AABB selectionBox = new AABB(
-            Math.min(start.getX(), end.getX()),
-            Math.min(start.getY(), end.getY()) - 3.0D,
-            Math.min(start.getZ(), end.getZ()),
-            Math.max(start.getX(), end.getX()) + 1.0D,
-            Math.max(start.getY(), end.getY()) + 6.0D,
-            Math.max(start.getZ(), end.getZ()) + 1.0D
+            Math.min(start.getX(), end.getX()) - 0.5D,
+            Math.min(start.getY(), end.getY()) - 24.0D,
+            Math.min(start.getZ(), end.getZ()) - 0.5D,
+            Math.max(start.getX(), end.getX()) + 1.5D,
+            Math.max(start.getY(), end.getY()) + 24.0D,
+            Math.max(start.getZ(), end.getZ()) + 1.5D
         );
 
         final List<AbstractEntityCitizen> citizens = mc.level.getEntitiesOfClass(AbstractEntityCitizen.class, selectionBox);

@@ -8,11 +8,14 @@ import com.minecolonies.core.rts.RtsResourceAggregator;
 import com.minecolonies.core.rts.RtsZoneData;
 import com.minecolonies.core.rts.RtsZoneType;
 import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import com.mojang.blaze3d.vertex.VertexFormat;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.client.renderer.RenderStateShard;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.core.BlockPos;
 import net.minecraft.tags.BlockTags;
@@ -33,6 +36,54 @@ public final class RtsGridRenderer
 {
     private RtsGridRenderer()
     {
+    }
+
+    private static final class RtsFillRenderType extends RenderType
+    {
+        private RtsFillRenderType(
+            final String name,
+            final VertexFormat format,
+            final VertexFormat.Mode mode,
+            final int bufferSize,
+            final boolean affectsCrumbling,
+            final boolean sortOnUpload,
+            final Runnable setupState,
+            final Runnable clearState)
+        {
+            super(name, format, mode, bufferSize, affectsCrumbling, sortOnUpload, setupState, clearState);
+        }
+
+        private static final RenderType RTS_ZONE_QUADS = RenderType.create(
+            "minecolonies:rts_zone_quads",
+            DefaultVertexFormat.POSITION_COLOR,
+            VertexFormat.Mode.QUADS,
+            2048,
+            false,
+            true,
+            RenderType.CompositeState.builder()
+                .setTextureState(NO_TEXTURE)
+                .setShaderState(POSITION_COLOR_SHADER)
+                .setTransparencyState(TRANSLUCENT_TRANSPARENCY)
+                .setDepthTestState(LEQUAL_DEPTH_TEST)
+                .setCullState(new RenderStateShard.CullStateShard(false))
+                .setLightmapState(NO_LIGHTMAP)
+                .setOverlayState(NO_OVERLAY)
+                .setLayeringState(new RenderStateShard.LayeringStateShard(
+                    "rts_polygon_offset",
+                    () -> {
+                        RenderSystem.enablePolygonOffset();
+                        RenderSystem.polygonOffset(-1.0F, -10.0F);
+                    },
+                    () -> {
+                        RenderSystem.polygonOffset(0.0F, 0.0F);
+                        RenderSystem.disablePolygonOffset();
+                    }
+                ))
+                .setOutputState(MAIN_TARGET)
+                .setTexturingState(DEFAULT_TEXTURING)
+                .setWriteMaskState(COLOR_WRITE)
+                .createCompositeState(false)
+        );
     }
 
     /**
@@ -101,14 +152,7 @@ public final class RtsGridRenderer
         poseStack.pushPose();
         poseStack.translate(-camPos.x, -camPos.y, -camPos.z);
 
-        RenderSystem.enableBlend();
-        RenderSystem.defaultBlendFunc();
-        RenderSystem.enableDepthTest();
-        RenderSystem.disableCull();
-        RenderSystem.enablePolygonOffset();
-        RenderSystem.polygonOffset(-1.0F, -10.0F);
-
-        final VertexConsumer fillBuffer = bufferSource.getBuffer(RenderType.debugFilledBox());
+        final VertexConsumer fillBuffer = bufferSource.getBuffer(RtsFillRenderType.RTS_ZONE_QUADS);
         for (final RtsZoneData zone : RtsResourceAggregator.getClientSnapshot().zones())
         {
             final BoundingBox box = zone.bounds();
@@ -219,7 +263,7 @@ public final class RtsGridRenderer
                 );
             }
         }
-        bufferSource.endBatch(RenderType.debugFilledBox());
+        bufferSource.endBatch(RtsFillRenderType.RTS_ZONE_QUADS);
 
         final VertexConsumer lineBuffer = bufferSource.getBuffer(RenderType.lines());
         for (final RtsZoneData zone : RtsResourceAggregator.getClientSnapshot().zones())
@@ -360,11 +404,6 @@ public final class RtsGridRenderer
             }
         }
         bufferSource.endBatch(RenderType.lines());
-
-        RenderSystem.polygonOffset(0.0F, 0.0F);
-        RenderSystem.disablePolygonOffset();
-        RenderSystem.enableCull();
-        RenderSystem.disableBlend();
         poseStack.popPose();
     }
 

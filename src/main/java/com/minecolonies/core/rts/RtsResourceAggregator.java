@@ -572,7 +572,7 @@ public final class RtsResourceAggregator
             return new ZonePlacementResult(existingInside.getPosition(), upgradeFeedback);
         }
 
-        final BlockPos hutPos = findPlaceableSurfacePos(level, box, centerPos);
+        final BlockPos hutPos = findPlaceableSurfacePos(level, colony, box, centerPos);
         if (hutPos == null || !WorldUtil.isBlockLoaded(level, hutPos) || targetHutBlock == null)
         {
             return new ZonePlacementResult(null, "[RTS] 구역 내 건물을 배치할 빈 평지 공간을 찾지 못했습니다.");
@@ -620,6 +620,7 @@ public final class RtsResourceAggregator
     @Nullable
     private static BlockPos findPlaceableSurfacePos(
         @NotNull final ServerLevel level,
+        @NotNull final IColony colony,
         @NotNull final BoundingBox box,
         @NotNull final BlockPos centerPos)
     {
@@ -628,6 +629,7 @@ public final class RtsResourceAggregator
         final int minZ = box.minZ();
         final int maxZ = box.maxZ();
         final int maxRadius = Math.max(maxX - minX, maxZ - minZ);
+        BlockPos fallbackCandidate = null;
 
         for (int radius = 0; radius <= maxRadius; radius++)
         {
@@ -663,12 +665,137 @@ public final class RtsResourceAggregator
                         && !below.is(BlockTags.LEAVES)
                         && !(below.getBlock() instanceof AbstractBlockHut))
                     {
+                        if (isInsideExistingColonyBuilding(colony, candidate))
+                        {
+                            if (fallbackCandidate == null)
+                            {
+                                fallbackCandidate = candidate;
+                            }
+                            continue;
+                        }
                         return candidate;
                     }
                 }
             }
         }
-        return null;
+        return fallbackCandidate;
+    }
+
+    private static boolean isInsideExistingColonyBuilding(@NotNull final IColony colony, @NotNull final BlockPos candidate)
+    {
+        for (final IBuilding existing : colony.getServerBuildingManager().getBuildings().values())
+        {
+            final BlockPos pos = existing.getPosition();
+            if (Math.abs(pos.getX() - candidate.getX()) <= 2 && Math.abs(pos.getZ() - candidate.getZ()) <= 2)
+            {
+                return true;
+            }
+            final net.minecraft.util.Tuple<BlockPos, BlockPos> corners = existing.getCorners();
+            if (corners != null && corners.getA() != null && corners.getB() != null && !corners.getA().equals(corners.getB()))
+            {
+                final BlockPos a = corners.getA();
+                final BlockPos b = corners.getB();
+                final int bMinX = Math.min(a.getX(), b.getX());
+                final int bMaxX = Math.max(a.getX(), b.getX());
+                final int bMinZ = Math.min(a.getZ(), b.getZ());
+                final int bMaxZ = Math.max(a.getZ(), b.getZ());
+                if (candidate.getX() >= bMinX && candidate.getX() <= bMaxX
+                    && candidate.getZ() >= bMinZ && candidate.getZ() <= bMaxZ)
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Resolves the canonical level-1 blueprint for {@code hutBlock} in {@code stylePack},
+     * accounting for Structurize stripping {@code .blueprint} from {@link Blueprint#getFileName()}.
+     */
+    @Nullable
+    public static Blueprint findLevelOneBlueprint(
+        @NotNull final String stylePack,
+        @NotNull final Block hutBlock,
+        @NotNull final String preferredSchematicName)
+    {
+        String resolvedPack = stylePack;
+        if (!StructurePacks.hasPack(resolvedPack))
+        {
+            final String mappedStyle = BlueprintMapping.getStyleMapping(resolvedPack.toLowerCase(Locale.ROOT).replace(" ", "").trim());
+            if (mappedStyle != null && StructurePacks.hasPack(mappedStyle))
+            {
+                resolvedPack = mappedStyle;
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        // Pass 1: exact canonical level-1 schematic (e.g., farmer1 rather than alfarmer1)
+        Blueprint match = StructurePacks.findBlueprint(
+            resolvedPack,
+            bp -> !BlueprintTagUtils.isInvisible(bp)
+                && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
+                && matchesCanonicalLevelOneName(bp.getFileName(), preferredSchematicName)
+        );
+        if (match != null)
+        {
+            return match;
+        }
+
+        // Pass 2: any level-1 variant belonging to this hut block (e.g., style-specific alt*1)
+        match = StructurePacks.findBlueprint(
+            resolvedPack,
+            bp -> !BlueprintTagUtils.isInvisible(bp)
+                && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
+                && isLevelOneBlueprintFileName(bp.getFileName())
+        );
+        if (match != null)
+        {
+            return match;
+        }
+
+        // Pass 3: any non-invisible blueprint with matching hut primary block
+        return StructurePacks.findBlueprint(
+            resolvedPack,
+            bp -> !BlueprintTagUtils.isInvisible(bp)
+                && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
+        );
+    }
+
+    private static boolean matchesCanonicalLevelOneName(@Nullable final String rawFileName, @NotNull final String preferredSchematicName)
+    {
+        if (rawFileName == null || rawFileName.isEmpty() || preferredSchematicName.isEmpty())
+        {
+            return false;
+        }
+        final String base = stripBlueprintExtension(rawFileName);
+        return base.equalsIgnoreCase(preferredSchematicName + "1")
+            || base.equalsIgnoreCase(preferredSchematicName);
+    }
+
+    private static boolean isLevelOneBlueprintFileName(@Nullable final String rawFileName)
+    {
+        if (rawFileName == null || rawFileName.isEmpty())
+        {
+            return false;
+        }
+        final String base = stripBlueprintExtension(rawFileName);
+        if (!base.endsWith("1"))
+        {
+            return false;
+        }
+        return base.length() < 2 || !Character.isDigit(base.charAt(base.length() - 2));
+    }
+
+    @NotNull
+    private static String stripBlueprintExtension(@NotNull final String rawFileName)
+    {
+        return rawFileName.endsWith(".blueprint")
+            ? rawFileName.substring(0, rawFileName.length() - ".blueprint".length())
+            : rawFileName;
     }
 
     @NotNull
@@ -679,30 +806,20 @@ public final class RtsResourceAggregator
         {
             try
             {
-                if (StructurePacks.hasPack(stylePack))
+                final Blueprint match = findLevelOneBlueprint(stylePack, hutBlock, zoneType.getDefaultSchematicName());
+                final String packKey = match != null && match.getPackName() != null && !match.getPackName().isEmpty()
+                    ? match.getPackName()
+                    : stylePack;
+                final StructurePackMeta meta = StructurePacks.getStructurePack(packKey);
+                if (match != null && meta != null && match.getFilePath() != null && match.getFileName() != null)
                 {
-                    Blueprint match = StructurePacks.findBlueprint(
-                        stylePack,
-                        bp -> !BlueprintTagUtils.isInvisible(bp)
-                            && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
-                            && bp.getFileName().endsWith("1.blueprint")
-                    );
-                    if (match == null)
+                    final String fileNameWithExt = match.getFileName().endsWith(".blueprint")
+                        ? match.getFileName()
+                        : match.getFileName() + ".blueprint";
+                    final String subPath = meta.getSubPath(match.getFilePath().resolve(fileNameWithExt));
+                    if (subPath != null && !subPath.isEmpty())
                     {
-                        match = StructurePacks.findBlueprint(
-                            stylePack,
-                            bp -> !BlueprintTagUtils.isInvisible(bp)
-                                && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
-                        );
-                    }
-                    final StructurePackMeta meta = StructurePacks.getStructurePack(stylePack);
-                    if (match != null && meta != null && match.getFilePath() != null && match.getFileName() != null)
-                    {
-                        final String subPath = meta.getSubPath(match.getFilePath().resolve(match.getFileName()));
-                        if (subPath != null && !subPath.isEmpty())
-                        {
-                            return normalizeBlueprintSubPath(subPath);
-                        }
+                        return normalizeBlueprintSubPath(subPath);
                     }
                 }
             }
@@ -737,6 +854,10 @@ public final class RtsResourceAggregator
         {
             return clean;
         }
+        if (clean.matches(".*[^0-9][1-5]$"))
+        {
+            return clean + ".blueprint";
+        }
         return clean + "1.blueprint";
     }
 
@@ -765,9 +886,13 @@ public final class RtsResourceAggregator
         if (building.getBuildingLevel() == 0 && !building.isPendingConstruction())
         {
             ensureAnyBuilderWithinRangeHasWorker(colony, hutPos);
-            if (!hasActiveBuilderWithinRange(colony, hutPos))
+            if (!building.canBeBuiltByBuilder(1) && !hasReadyBuilderWithinRange(colony, hutPos))
             {
-                return "[RTS] " + zoneType.getDisplayName() + " 배치됨 - 반경 100블록 내 일꾼이 있는 건축가(Builder) 구역이 필요합니다.";
+                if (hasAnyBuilderWithWorkerWithinRange(colony, hutPos))
+                {
+                    return "[RTS] " + zoneType.getDisplayName() + " 배치됨 - 건축가(Builder) 1레벨 완공 후 건설 지시가 가능합니다.";
+                }
+                return "[RTS] " + zoneType.getDisplayName() + " 배치됨 - 반경 100블록 내 일꾼이 있는 Lv.1+ 건축가(Builder) 구역이 필요합니다.";
             }
             building.requestUpgrade(player, BlockPos.ZERO);
         }
@@ -810,7 +935,22 @@ public final class RtsResourceAggregator
         }
     }
 
-    private static boolean hasActiveBuilderWithinRange(@NotNull final IColony colony, @NotNull final BlockPos sitePos)
+    private static boolean hasReadyBuilderWithinRange(@NotNull final IColony colony, @NotNull final BlockPos sitePos)
+    {
+        for (final IBuilding candidate : colony.getServerBuildingManager().getBuildings().values())
+        {
+            if (candidate instanceof BuildingBuilder
+                && candidate.getBuildingLevel() >= 1
+                && !candidate.getAllAssignedCitizen().isEmpty()
+                && candidate.getPosition().distSqr(sitePos) <= 100.0D * 100.0D)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasAnyBuilderWithWorkerWithinRange(@NotNull final IColony colony, @NotNull final BlockPos sitePos)
     {
         for (final IBuilding candidate : colony.getServerBuildingManager().getBuildings().values())
         {

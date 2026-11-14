@@ -83,12 +83,22 @@ public final class RtsInteractionBridge
                 return;
             }
 
-            final BlockPos center = new BlockPos(
-                (startPos.getX() + endPos.getX()) / 2,
-                Math.max(startPos.getY(), endPos.getY()) + 1,
-                (startPos.getZ() + endPos.getZ()) / 2
-            );
-            openModeBBlueprintPreview(center, zoneType);
+            final int cx = (startPos.getX() + endPos.getX()) / 2;
+            final int cz = (startPos.getZ() + endPos.getZ()) / 2;
+            int cy = Math.max(startPos.getY(), endPos.getY()) + 1;
+            if (mc.level != null && mc.level.hasChunkAt(new BlockPos(cx, startPos.getY(), cz)))
+            {
+                final int groundY = mc.level.getHeight(
+                    net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                    cx,
+                    cz
+                );
+                if (groundY > mc.level.getMinBuildHeight())
+                {
+                    cy = groundY;
+                }
+            }
+            openModeBBlueprintPreview(new BlockPos(cx, cy, cz), zoneType);
         }
     }
 
@@ -146,46 +156,50 @@ public final class RtsInteractionBridge
         }
 
         final Block hutBlock = zoneType.getDefaultHutBlock();
+        final Blueprint matched = hutBlock != null
+            ? RtsResourceAggregator.findLevelOneBlueprint(resolvedPack, hutBlock, zoneType.getDefaultSchematicName())
+            : null;
+
+        try
+        {
+            final BlueprintPreviewData preData = RenderingCache.getOrCreateBlueprintPreviewData("blueprint");
+            preData.setPos(targetPos);
+            if (matched != null)
+            {
+                preData.setBlueprint(matched);
+            }
+        }
+        catch (final Throwable ignored)
+        {
+        }
+
         final WindowExtendedBuildTool window = new WindowExtendedBuildTool(targetPos, GROUNDSTYLE_RELATIVE);
 
         try
         {
             final BlueprintPreviewData previewData = RenderingCache.getOrCreateBlueprintPreviewData("blueprint");
             previewData.setPos(targetPos);
-            if (hutBlock != null)
+            if (matched != null)
             {
-                Blueprint matched = null;
-                if (StructurePacks.hasPack(resolvedPack))
-                {
-                    matched = StructurePacks.findBlueprint(
-                        resolvedPack,
-                        bp -> !BlueprintTagUtils.isInvisible(bp)
-                            && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
-                            && bp.getFileName().endsWith("1.blueprint")
-                    );
-                    if (matched == null)
-                    {
-                        matched = StructurePacks.findBlueprint(
-                            resolvedPack,
-                            bp -> !BlueprintTagUtils.isInvisible(bp)
-                                && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
-                        );
-                    }
-                }
-                if (matched != null)
+                if (previewData.getBlueprint() == null)
                 {
                     previewData.setBlueprint(matched);
-                    previewData.syncChangesToServer();
-                    window.selectedBlueprint = matched;
                 }
-                else
+                previewData.syncChangesToServer();
+                window.selectedBlueprint = matched;
+                final com.ldtteam.blockui.Pane manipulator = window.findPaneByID("manipulator");
+                if (manipulator != null)
                 {
-                    previewData.setBlueprintFuture(StructurePacks.findBlueprintFuture(
-                        resolvedPack,
-                        bp -> !BlueprintTagUtils.isInvisible(bp)
-                            && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
-                    ));
+                    manipulator.setVisible(true);
                 }
+            }
+            else if (hutBlock != null)
+            {
+                previewData.setBlueprintFuture(StructurePacks.findBlueprintFuture(
+                    resolvedPack,
+                    bp -> !BlueprintTagUtils.isInvisible(bp)
+                        && bp.getBlockState(bp.getPrimaryBlockOffset()).getBlock() == hutBlock
+                ));
             }
         }
         catch (final Throwable ignored)
