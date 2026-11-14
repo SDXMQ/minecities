@@ -111,7 +111,7 @@ public class ClientEventHandler
         com.minecolonies.core.client.rts.RtsCameraController.onComputeCameraAngles(event);
     }
 
-    @SubscribeEvent
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onRtsMouseScroll(@NotNull final net.minecraftforge.client.event.InputEvent.MouseScrollingEvent event)
     {
         com.minecolonies.core.client.rts.RtsCameraController.onMouseScroll(event);
@@ -121,6 +121,31 @@ public class ClientEventHandler
     public static void onRtsMouseButtonPre(@NotNull final net.minecraftforge.client.event.InputEvent.MouseButton.Pre event)
     {
         com.minecolonies.core.client.rts.RtsCameraController.onMouseButtonPre(event);
+    }
+
+    @SubscribeEvent
+    public static void onRtsInteractionKeyMapping(@NotNull final net.minecraftforge.client.event.InputEvent.InteractionKeyMappingTriggered event)
+    {
+        com.minecolonies.core.client.rts.RtsCameraController.onInteractionKeyMappingTriggered(event);
+    }
+
+    @SubscribeEvent
+    public static void onRtsRenderHand(@NotNull final net.minecraftforge.client.event.RenderHandEvent event)
+    {
+        if (com.minecolonies.core.client.rts.RtsCameraController.isActive())
+        {
+            event.setCanceled(true);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onRtsRenderGuiOverlayPre(@NotNull final net.minecraftforge.client.event.RenderGuiOverlayEvent.Pre event)
+    {
+        if (com.minecolonies.core.client.rts.RtsCameraController.isActive()
+            && net.minecraftforge.client.gui.overlay.VanillaGuiOverlay.CROSSHAIR.id().equals(event.getOverlay().id()))
+        {
+            event.setCanceled(true);
+        }
     }
 
     @SubscribeEvent
