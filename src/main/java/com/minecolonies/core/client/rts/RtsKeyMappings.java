@@ -35,7 +35,7 @@ public final class RtsKeyMappings
         "key.minecolonies.rts.toggle_delete",
         KeyConflictContext.IN_GAME,
         InputConstants.Type.KEYSYM,
-        GLFW.GLFW_KEY_X,
+        GLFW.GLFW_KEY_V,
         CATEGORY
     ));
 

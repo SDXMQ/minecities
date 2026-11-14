@@ -67,6 +67,17 @@ public final class RtsCameraController
         "궁수(Archer)"
     };
 
+    private static final String[] CITIZEN_JOB_SHORT_LABELS = {
+        "기본",
+        "건축",
+        "벌목",
+        "광부",
+        "농부",
+        "택배",
+        "기사",
+        "궁수"
+    };
+
     private static boolean active = false;
     private static Vec3 cameraPos = Vec3.ZERO;
     private static double altitude = 25.0D;
@@ -269,6 +280,96 @@ public final class RtsCameraController
         return CITIZEN_JOB_LABELS[activeJobIndex];
     }
 
+    @NotNull
+    public static String getActiveJobShortLabel()
+    {
+        return CITIZEN_JOB_SHORT_LABELS[activeJobIndex];
+    }
+
+    public static void setActiveZoneType(@NotNull final RtsZoneType type)
+    {
+        activeZoneType = type;
+        deleteMode = false;
+    }
+
+    public static void setActiveZoneType(@NotNull final RtsZoneType type, @Nullable final Minecraft mc)
+    {
+        setActiveZoneType(type);
+        if (mc != null && mc.gui != null)
+        {
+            mc.gui.setOverlayMessage(Component.literal("[RTS] 선택 구역: " + activeZoneType.getDisplayName()), false);
+        }
+    }
+
+    public static boolean toggleDeleteMode()
+    {
+        deleteMode = !deleteMode;
+        return deleteMode;
+    }
+
+    public static boolean toggleDeleteMode(@Nullable final Minecraft mc)
+    {
+        final boolean enabled = toggleDeleteMode();
+        if (mc != null && mc.gui != null)
+        {
+            mc.gui.setOverlayMessage(
+                Component.literal(enabled ? "[RTS] 구역 해제(철거) 모드" : "[RTS] 구역 지정 모드: " + activeZoneType.getDisplayName()),
+                false
+            );
+        }
+        return enabled;
+    }
+
+    @NotNull
+    public static RtsZonePlacementMode cyclePlacementMode()
+    {
+        final RtsZonePlacementMode nextMode = getActivePlacementMode().next();
+        placementModeOverride = nextMode;
+        try
+        {
+            MineColonies.getConfig().getClient().rtsZonePlacementMode.set(nextMode);
+        }
+        catch (final Exception ignored)
+        {
+        }
+        return nextMode;
+    }
+
+    @NotNull
+    public static RtsZonePlacementMode cyclePlacementMode(@Nullable final Minecraft mc)
+    {
+        final RtsZonePlacementMode nextMode = cyclePlacementMode();
+        if (mc != null && mc.gui != null)
+        {
+            mc.gui.setOverlayMessage(
+                Component.literal("[RTS] 구역 배치 방식 전환: " + nextMode.getDisplayName()),
+                false
+            );
+        }
+        return nextMode;
+    }
+
+    @NotNull
+    public static String cycleCitizenJob()
+    {
+        activeJobIndex = (activeJobIndex + 1) % CITIZEN_JOB_CYCLE.length;
+        return getActiveJobDisplayLabel();
+    }
+
+    @NotNull
+    public static String cycleCitizenJob(@Nullable final Minecraft mc)
+    {
+        final String label = cycleCitizenJob();
+        if (mc != null && mc.gui != null)
+        {
+            mc.gui.setOverlayMessage(
+                Component.literal("[RTS] 시민 배치 직업: " + label),
+                false
+            );
+        }
+        return label;
+    }
+
     public static boolean isDragging()
     {
         return isDragging;
@@ -460,44 +561,22 @@ public final class RtsCameraController
 
         while (RtsKeyMappings.CYCLE_ZONE_TYPE.get().consumeClick())
         {
-            activeZoneType = activeZoneType.next();
-            deleteMode = false;
-            mc.gui.setOverlayMessage(Component.literal("[RTS] 선택 구역: " + activeZoneType.getDisplayName()), false);
+            setActiveZoneType(activeZoneType.next(), mc);
         }
 
         while (RtsKeyMappings.TOGGLE_DELETE_MODE.get().consumeClick())
         {
-            deleteMode = !deleteMode;
-            mc.gui.setOverlayMessage(
-                Component.literal(deleteMode ? "[RTS] 구역 해제(철거) 모드" : "[RTS] 구역 지정 모드: " + activeZoneType.getDisplayName()),
-                false
-            );
+            toggleDeleteMode(mc);
         }
 
         while (RtsKeyMappings.CYCLE_CITIZEN_JOB.get().consumeClick())
         {
-            activeJobIndex = (activeJobIndex + 1) % CITIZEN_JOB_CYCLE.length;
-            mc.gui.setOverlayMessage(
-                Component.literal("[RTS] 시민 배치 직업: " + getActiveJobDisplayLabel()),
-                false
-            );
+            cycleCitizenJob(mc);
         }
 
         while (RtsKeyMappings.TOGGLE_PLACEMENT_MODE.get().consumeClick())
         {
-            final RtsZonePlacementMode nextMode = getActivePlacementMode().next();
-            placementModeOverride = nextMode;
-            try
-            {
-                MineColonies.getConfig().getClient().rtsZonePlacementMode.set(nextMode);
-            }
-            catch (final Exception ignored)
-            {
-            }
-            mc.gui.setOverlayMessage(
-                Component.literal("[RTS] 구역 배치 방식 전환: " + nextMode.getDisplayName()),
-                false
-            );
+            cyclePlacementMode(mc);
         }
 
         // Prevent stuck drag or hover state when any GUI screen opens
@@ -764,10 +843,19 @@ public final class RtsCameraController
             return;
         }
 
+        final double guiX = mc.mouseHandler.xpos() * (double) mc.getWindow().getGuiScaledWidth() / (double) Math.max(1, mc.getWindow().getScreenWidth());
+        final double guiY = mc.mouseHandler.ypos() * (double) mc.getWindow().getGuiScaledHeight() / (double) Math.max(1, mc.getWindow().getScreenHeight());
+
         if (button == GLFW.GLFW_MOUSE_BUTTON_LEFT)
         {
             if (action == GLFW.GLFW_PRESS)
             {
+                if (RtsTopBarOverlay.handleToolbarClick(mc, guiX, guiY))
+                {
+                    event.setCanceled(true);
+                    return;
+                }
+
                 dragStartScreenX = mc.mouseHandler.xpos();
                 dragStartScreenY = mc.mouseHandler.ypos();
 
@@ -858,6 +946,17 @@ public final class RtsCameraController
         {
             if (action == GLFW.GLFW_PRESS)
             {
+                final List<RtsTopBarOverlay.ToolbarButton> toolbarButtons = RtsTopBarOverlay.computeToolbarButtons(
+                    mc.getWindow().getGuiScaledWidth(),
+                    mc.getWindow().getGuiScaledHeight(),
+                    getActivePlacementMode(),
+                    getActiveJobShortLabel()
+                );
+                if (RtsTopBarOverlay.isHudBlockingPoint(toolbarButtons, guiX, guiY))
+                {
+                    event.setCanceled(true);
+                    return;
+                }
                 RtsInteractionBridge.handleRightClickInRts(
                     mc,
                     selectedCitizenEntityIds,
